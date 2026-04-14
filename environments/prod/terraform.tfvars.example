@@ -1,0 +1,44 @@
+# environments/prod/terraform.tfvars.example
+# Copy this to terraform.tfvars and fill in your values
+# NEVER commit terraform.tfvars — it is in .gitignore
+
+# ── OCI ──────────────────────────────────────────────────────────────────────
+oci_tenancy_ocid        = "ocid1.tenancy.oc1..xxxxxxxxxxxxxxxxxxxx"
+oci_user_ocid           = "ocid1.user.oc1..xxxxxxxxxxxxxxxxxxxx"
+oci_fingerprint         = "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99"
+oci_region              = "ap-mumbai-1"
+oci_compartment_id      = "ocid1.compartment.oc1..xxxxxxxxxxxxxxxxxxxx"
+oci_availability_domain = "VoXO:AP-MUMBAI-1-AD-1"   # Run: oci iam availability-domain list
+
+# ── AWS ──────────────────────────────────────────────────────────────────────
+aws_region     = "ap-south-1"
+aws_account_id = "123456789012"
+
+# ── GCP ──────────────────────────────────────────────────────────────────────
+gcp_project_id = "my-project-123456"
+gcp_region     = "us-central1"   # MUST be us-central1 / us-east1 / us-west1 for free tier
+
+# ── Azure ─────────────────────────────────────────────────────────────────────
+azure_tenant_id     = "00000000-0000-0000-0000-000000000000"
+azure_client_id     = "00000000-0000-0000-0000-000000000000"
+azure_client_secret = "your-service-principal-secret"
+
+# ── Cloudflare ────────────────────────────────────────────────────────────────
+cloudflare_api_token = "your-cloudflare-api-token"
+cloudflare_zone_id   = "your-zone-id"
+
+# ── Common ───────────────────────────────────────────────────────────────────
+domain_name    = "yourdomain.com"
+alert_email    = "you@example.com"
+ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA..."
+tailscale_auth_key = "tskey-auth-xxxxxxxxxxxx-yyyyyyyyyyyyyy"
+
+# Restrict admin access to your home IP for extra security (recommended)
+admin_allowed_cidrs = ["YOUR_HOME_IP/32"]
+
+# GitHub
+github_org  = "your-github-username"
+github_repo = "multi-cloud-infra"
+
+# Set this AFTER first deploy — run `tailscale ip -4` on OCI server
+oci_tailscale_ip = ""  # e.g. "100.64.0.1"

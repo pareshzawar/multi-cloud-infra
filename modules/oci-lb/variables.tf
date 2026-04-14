@@ -1,0 +1,10 @@
+variable "compartment_id" { type = string }
+variable "public_subnet_id" { type = string }
+variable "lb_nsg_id" { type = string }
+variable "backend_instance_ip" { type = string }
+variable "backend_http_port" { type = number }
+variable "backend_https_port" { type = number }
+variable "domain_name" { type = string }
+variable "n8n_subdomain" { type = string }
+variable "wg_subdomain" { type = string }
+variable "tags" { type = map(string) }
