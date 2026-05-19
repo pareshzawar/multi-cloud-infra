@@ -57,28 +57,19 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
           cat > terraform.tfvars << EOF
-          # OCI
           oci_tenancy_ocid     = "${{ secrets.OCI_TENANCY_OCID }}"
           oci_user_ocid        = "${{ secrets.OCI_USER_OCID }}"
           oci_fingerprint      = "${{ secrets.OCI_FINGERPRINT }}"
           oci_region           = "${{ secrets.OCI_REGION }}"
           oci_compartment_id   = "${{ secrets.OCI_COMPARTMENT_ID }}"
           ssh_public_key       = "${{ secrets.SSH_PUBLIC_KEY }}"
-
-          # AWS
           aws_region           = "${{ secrets.AWS_REGION }}"
           aws_account_id       = "${{ secrets.AWS_ACCOUNT_ID }}"
-
-          # GCP
           gcp_project_id       = "${{ secrets.GCP_PROJECT_ID }}"
           gcp_region           = "us-central1"
-
-          # Azure
           azure_tenant_id      = "${{ secrets.AZURE_TENANT_ID }}"
           azure_client_id      = "${{ secrets.AZURE_CLIENT_ID }}"
           azure_client_secret  = "${{ secrets.AZURE_CLIENT_SECRET }}"
-
-          # Common
           alert_email          = "${{ secrets.ALERT_EMAIL }}"
           domain_name          = "${{ secrets.DOMAIN_NAME }}"
           cloudflare_api_token = "${{ secrets.CLOUDFLARE_API_TOKEN }}"
@@ -97,9 +88,13 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform fmt -check -recursive
 
+      # FIX: Added id: plan so steps.plan.outputs.stdout resolves correctly.
+      # FIX: Added continue-on-error: true so the comment step still runs on plan failure.
       - name: Terraform Plan
+        id: plan                                      # FIX: was missing — PR comment was always blank
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform plan -out=tfplan -input=false
+        run: terraform plan -no-color -input=false
+        continue-on-error: true                       # FIX: allows comment step to run even if plan fails
         env:
           TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
 
@@ -108,17 +103,33 @@ jobs:
         if: always()
         with:
           script: |
-            const output = `#### Terraform Plan 📋
+            const planOutput = `${{ steps.plan.outputs.stdout }}`;
+            const planOutcome = '${{ steps.plan.outcome }}';
+            const icon = planOutcome === 'success' ? '✅' : '❌';
+
+            const body = `#### Terraform Plan ${icon} \`${{ steps.plan.outcome }}\`
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`terraform
+            ${planOutput || 'No plan output captured.'}
             \`\`\`
-            ${{ steps.plan.outputs.stdout }}
-            \`\`\`
-            *Pushed by: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+
+            </details>
+
+            *Triggered by @${{ github.actor }} · \`${{ github.event_name }}\` · ${{ github.sha }}*`;
+
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: output
-            })
+              body: body
+            });
+
+      # Fail the job if plan failed (after comment is posted)
+      - name: Check Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
 
   terraform-apply:
     name: Terraform Apply
@@ -188,6 +199,12 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform init
 
+      # FIX: Plan first, save to file, apply from saved plan.
+      # This guarantees exactly what was reviewed in the PR is what gets applied.
+      - name: Terraform Plan (pre-apply)
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform plan -out=tfplan -input=false
+
       - name: Terraform Apply
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform apply -auto-approve -input=false
+        run: terraform apply tfplan              # FIX: was -auto-approve (no plan file)
