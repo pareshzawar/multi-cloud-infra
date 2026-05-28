@@ -46,6 +46,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.OCI_STATE_SECRET_KEY }}
           AWS_DEFAULT_REGION:    ap-south-1
           AWS_REGION:            ap-south-1
+          TF_VAR_aws_region:     ap-south-1
           TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
           TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
@@ -71,6 +72,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION:    ap-south-1
           AWS_REGION:            ap-south-1
+          TF_VAR_aws_region:     ap-south-1
           TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
           TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
@@ -141,6 +143,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.OCI_STATE_SECRET_KEY }}
           AWS_DEFAULT_REGION:    ap-south-1
           AWS_REGION:            ap-south-1
+          TF_VAR_aws_region:     ap-south-1
           TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
           TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
@@ -163,6 +166,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION:    ap-south-1
           AWS_REGION:            ap-south-1
+          TF_VAR_aws_region:     ap-south-1
           TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
           TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
