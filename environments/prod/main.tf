@@ -50,6 +50,8 @@ provider "oci" {
 
 provider "aws" {
   region = var.aws_region
+  # Prevents AWS provider from calling STS during init with wrong credentials
+  skip_requesting_account_id = true
 }
 
 provider "google" {
@@ -230,7 +232,6 @@ module "aws_vault" {
   tailscale_auth_key = var.tailscale_auth_key
   tailscale_hostname = "aws-vault"
   backup_bucket_name = "vaultwarden-backup-${var.aws_account_id}"
-  aws_region         = var.aws_region
 
   tags = local.common_tags
 }
