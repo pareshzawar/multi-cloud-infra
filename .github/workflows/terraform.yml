@@ -50,8 +50,13 @@ jobs:
           # These are NOT your AWS creds — different key pair generated in
           # OCI Console -> Profile -> Customer Secret Keys.
           # GitHub Secrets needed: OCI_STATE_ACCESS_KEY, OCI_STATE_SECRET_KEY
+          # OCI Customer Secret Keys — used ONLY for the S3-compatible state backend
           AWS_ACCESS_KEY_ID:              ${{ secrets.OCI_STATE_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY:          ${{ secrets.OCI_STATE_SECRET_KEY }}
+          # Pin region to ap-south-1 so the AWS provider doesn't inherit the
+          # OCI region (us-ashburn-1) that leaks from configure-aws-credentials
+          AWS_DEFAULT_REGION:             ap-south-1
+          AWS_REGION:                     ap-south-1
           TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
           TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
@@ -74,6 +79,8 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID:              ${{ secrets.OCI_STATE_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY:          ${{ secrets.OCI_STATE_SECRET_KEY }}
+          AWS_DEFAULT_REGION:             ap-south-1
+          AWS_REGION:                     ap-south-1
           TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
           TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
@@ -147,8 +154,13 @@ jobs:
       - name: Terraform Init
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
+          # OCI Customer Secret Keys — used ONLY for the S3-compatible state backend
           AWS_ACCESS_KEY_ID:              ${{ secrets.OCI_STATE_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY:          ${{ secrets.OCI_STATE_SECRET_KEY }}
+          # Pin region to ap-south-1 so the AWS provider doesn't inherit the
+          # OCI region (us-ashburn-1) that leaks from configure-aws-credentials
+          AWS_DEFAULT_REGION:             ap-south-1
+          AWS_REGION:                     ap-south-1
           TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
           TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
