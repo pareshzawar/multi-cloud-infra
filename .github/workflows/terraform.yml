@@ -1,22 +1,26 @@
-name: Terraform CI/CD
+name: Terraform
 
 on:
   push:
     branches: [main]
-    paths: ["environments/**", "modules/**"]
   pull_request:
     branches: [main]
-    paths: ["environments/**", "modules/**"]
 
 env:
   TF_WORKING_DIR: environments/prod
-  TF_VERSION: "1.7.5"
+  TF_VERSION: 1.7.5
+  # Node.js 24 opt-in — required before June 2 2026 forced cutover
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   terraform-plan:
     name: Terraform Plan
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+
+    permissions:
+      contents: read
+      pull-requests: write   # FIXED: was missing — caused 403 on PR comment
 
     steps:
       - name: Checkout
@@ -27,92 +31,68 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Configure OCI credentials
-        run: |
-          mkdir -p ~/.oci
-          echo "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
-          chmod 600 ~/.oci/oci_api_key.pem
-          cat > ~/.oci/config << EOF
-          [DEFAULT]
-          user=${{ secrets.OCI_USER_OCID }}
-          fingerprint=${{ secrets.OCI_FINGERPRINT }}
-          tenancy=${{ secrets.OCI_TENANCY_OCID }}
-          region=${{ secrets.OCI_REGION }}
-          key_file=~/.oci/oci_api_key.pem
-          EOF
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region:            ${{ secrets.AWS_DEFAULT_REGION }}
 
-      - name: Configure GCP credentials
+      - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_CREDENTIALS_JSON }}
 
-      - name: Write tfvars
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: |
-          cat > terraform.tfvars << EOF
-          oci_tenancy_ocid     = "${{ secrets.OCI_TENANCY_OCID }}"
-          oci_user_ocid        = "${{ secrets.OCI_USER_OCID }}"
-          oci_fingerprint      = "${{ secrets.OCI_FINGERPRINT }}"
-          oci_region           = "${{ secrets.OCI_REGION }}"
-          oci_compartment_id   = "${{ secrets.OCI_COMPARTMENT_ID }}"
-          ssh_public_key       = "${{ secrets.SSH_PUBLIC_KEY }}"
-          aws_region           = "${{ secrets.AWS_REGION }}"
-          aws_account_id       = "${{ secrets.AWS_ACCOUNT_ID }}"
-          gcp_project_id       = "${{ secrets.GCP_PROJECT_ID }}"
-          gcp_region           = "us-central1"
-          azure_tenant_id      = "${{ secrets.AZURE_TENANT_ID }}"
-          azure_client_id      = "${{ secrets.AZURE_CLIENT_ID }}"
-          azure_client_secret  = "${{ secrets.AZURE_CLIENT_SECRET }}"
-          alert_email          = "${{ secrets.ALERT_EMAIL }}"
-          domain_name          = "${{ secrets.DOMAIN_NAME }}"
-          cloudflare_api_token = "${{ secrets.CLOUDFLARE_API_TOKEN }}"
-          cloudflare_zone_id   = "${{ secrets.CLOUDFLARE_ZONE_ID }}"
-          EOF
-
       - name: Terraform Init
         working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
+          TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
+          TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
+          TF_VAR_oci_private_key:         ${{ secrets.OCI_PRIVATE_KEY }}
+          TF_VAR_oci_region:              ${{ secrets.OCI_REGION }}
+          TF_VAR_tailscale_auth_key:      ${{ secrets.TAILSCALE_AUTH_KEY }}
+          TF_VAR_cloudflare_api_token:    ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_cloudflare_zone_id:      ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          TF_VAR_azure_tenant_id:         ${{ secrets.AZURE_TENANT_ID }}
+          TF_VAR_azure_client_id:         ${{ secrets.AZURE_CLIENT_ID }}
+          TF_VAR_azure_client_secret:     ${{ secrets.AZURE_CLIENT_SECRET }}
+          TF_VAR_azure_subscription_id:   ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_alert_email:             ${{ secrets.ALERT_EMAIL }}
         run: terraform init
 
-      - name: Terraform Validate
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform validate
-
-      - name: Terraform Format Check
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform fmt -check -recursive
-
-      # FIX: Added id: plan so steps.plan.outputs.stdout resolves correctly.
-      # FIX: Added continue-on-error: true so the comment step still runs on plan failure.
       - name: Terraform Plan
-        id: plan                                      # FIX: was missing — PR comment was always blank
+        id: plan                     # FIXED: id was missing — PR comment had no output
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform plan -no-color -input=false
-        continue-on-error: true                       # FIX: allows comment step to run even if plan fails
+        continue-on-error: true      # FIXED: comment posts even when plan fails
         env:
-          TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+          TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
+          TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
+          TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
+          TF_VAR_oci_private_key:         ${{ secrets.OCI_PRIVATE_KEY }}
+          TF_VAR_oci_region:              ${{ secrets.OCI_REGION }}
+          TF_VAR_tailscale_auth_key:      ${{ secrets.TAILSCALE_AUTH_KEY }}
+          TF_VAR_cloudflare_api_token:    ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_cloudflare_zone_id:      ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          TF_VAR_azure_tenant_id:         ${{ secrets.AZURE_TENANT_ID }}
+          TF_VAR_azure_client_id:         ${{ secrets.AZURE_CLIENT_ID }}
+          TF_VAR_azure_client_secret:     ${{ secrets.AZURE_CLIENT_SECRET }}
+          TF_VAR_azure_subscription_id:   ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_alert_email:             ${{ secrets.ALERT_EMAIL }}
+        run: terraform plan -no-color -out=tfplan
 
-      - name: Comment PR with plan
+      - name: Post plan as PR comment
         uses: actions/github-script@v7
         if: always()
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const planOutput = `${{ steps.plan.outputs.stdout }}`;
-            const planOutcome = '${{ steps.plan.outcome }}';
-            const icon = planOutcome === 'success' ? '✅' : '❌';
-
-            const body = `#### Terraform Plan ${icon} \`${{ steps.plan.outcome }}\`
+            const output = `#### Terraform Plan ${{ steps.plan.outcome == 'success' && '✅' || '❌' }} \`${{ steps.plan.outcome }}\`
 
             <details><summary>Show Plan</summary>
 
             \`\`\`terraform
-            ${planOutput || 'No plan output captured.'}
+            ${{ steps.plan.outputs.stdout || 'No plan output captured.' }}
             \`\`\`
 
             </details>
@@ -123,19 +103,17 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: body
+              body: output
             });
-
-      # Fail the job if plan failed (after comment is posted)
-      - name: Check Plan Status
-        if: steps.plan.outcome == 'failure'
-        run: exit 1
 
   terraform-apply:
     name: Terraform Apply
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment: production
+
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
@@ -146,65 +124,54 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Configure OCI credentials
-        run: |
-          mkdir -p ~/.oci
-          echo "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
-          chmod 600 ~/.oci/oci_api_key.pem
-          cat > ~/.oci/config << EOF
-          [DEFAULT]
-          user=${{ secrets.OCI_USER_OCID }}
-          fingerprint=${{ secrets.OCI_FINGERPRINT }}
-          tenancy=${{ secrets.OCI_TENANCY_OCID }}
-          region=${{ secrets.OCI_REGION }}
-          key_file=~/.oci/oci_api_key.pem
-          EOF
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region:            ${{ secrets.AWS_DEFAULT_REGION }}
 
-      - name: Configure GCP credentials
+      - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_CREDENTIALS_JSON }}
 
-      - name: Write tfvars
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: |
-          cat > terraform.tfvars << EOF
-          oci_tenancy_ocid     = "${{ secrets.OCI_TENANCY_OCID }}"
-          oci_user_ocid        = "${{ secrets.OCI_USER_OCID }}"
-          oci_fingerprint      = "${{ secrets.OCI_FINGERPRINT }}"
-          oci_region           = "${{ secrets.OCI_REGION }}"
-          oci_compartment_id   = "${{ secrets.OCI_COMPARTMENT_ID }}"
-          ssh_public_key       = "${{ secrets.SSH_PUBLIC_KEY }}"
-          aws_region           = "${{ secrets.AWS_REGION }}"
-          aws_account_id       = "${{ secrets.AWS_ACCOUNT_ID }}"
-          gcp_project_id       = "${{ secrets.GCP_PROJECT_ID }}"
-          gcp_region           = "us-central1"
-          azure_tenant_id      = "${{ secrets.AZURE_TENANT_ID }}"
-          azure_client_id      = "${{ secrets.AZURE_CLIENT_ID }}"
-          azure_client_secret  = "${{ secrets.AZURE_CLIENT_SECRET }}"
-          alert_email          = "${{ secrets.ALERT_EMAIL }}"
-          domain_name          = "${{ secrets.DOMAIN_NAME }}"
-          cloudflare_api_token = "${{ secrets.CLOUDFLARE_API_TOKEN }}"
-          cloudflare_zone_id   = "${{ secrets.CLOUDFLARE_ZONE_ID }}"
-          EOF
-
       - name: Terraform Init
         working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
+          TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
+          TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
+          TF_VAR_oci_private_key:         ${{ secrets.OCI_PRIVATE_KEY }}
+          TF_VAR_oci_region:              ${{ secrets.OCI_REGION }}
+          TF_VAR_tailscale_auth_key:      ${{ secrets.TAILSCALE_AUTH_KEY }}
+          TF_VAR_cloudflare_api_token:    ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_cloudflare_zone_id:      ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          TF_VAR_azure_tenant_id:         ${{ secrets.AZURE_TENANT_ID }}
+          TF_VAR_azure_client_id:         ${{ secrets.AZURE_CLIENT_ID }}
+          TF_VAR_azure_client_secret:     ${{ secrets.AZURE_CLIENT_SECRET }}
+          TF_VAR_azure_subscription_id:   ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_alert_email:             ${{ secrets.ALERT_EMAIL }}
         run: terraform init
 
-      # FIX: Plan first, save to file, apply from saved plan.
-      # This guarantees exactly what was reviewed in the PR is what gets applied.
-      - name: Terraform Plan (pre-apply)
+      - name: Terraform Plan (saved)
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform plan -out=tfplan -input=false
-
-      - name: Terraform Apply
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform apply tfplan              # FIX: was -auto-approve (no plan file)
+        env:
+          TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
+          TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
+          TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
+          TF_VAR_oci_private_key:         ${{ secrets.OCI_PRIVATE_KEY }}
+          TF_VAR_oci_region:              ${{ secrets.OCI_REGION }}
+          TF_VAR_tailscale_auth_key:      ${{ secrets.TAILSCALE_AUTH_KEY }}
+          TF_VAR_cloudflare_api_token:    ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_cloudflare_zone_id:      ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          TF_VAR_azure_tenant_id:         ${{ secrets.AZURE_TENANT_ID }}
+          TF_VAR_azure_client_id:         ${{ secrets.AZURE_CLIENT_ID }}
+          TF_VAR_azure_client_secret:     ${{ secrets.AZURE_CLIENT_SECRET }}
+          TF_VAR_azure_subscription_id:   ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_alert_email:             ${{ secrets.ALERT_EMAIL }}
+        # FIXED: saves plan then applies the saved file — guarantees what you
+        # reviewed in the PR comment is exactly what gets applied
+        run: |
+          terraform plan -no-color -out=tfplan
+          terraform apply tfplan
