@@ -9,7 +9,6 @@ on:
 env:
   TF_WORKING_DIR: environments/prod
   TF_VERSION: 1.7.5
-  # Node.js 24 opt-in — required before June 2 2026 forced cutover
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -20,7 +19,7 @@ jobs:
 
     permissions:
       contents: read
-      pull-requests: write   # FIXED: was missing — caused 403 on PR comment
+      pull-requests: write
 
     steps:
       - name: Checkout
@@ -31,32 +30,22 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ap-south-1   # hardcoded — region is not sensitive
-
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_CREDENTIALS_JSON }}
 
+      # Init uses OCI Customer Secret Keys for the S3-compatible state backend.
+      # configure-aws-credentials is intentionally NOT called before this step —
+      # that action exports job-level env vars that cannot be overridden by step
+      # env blocks, causing the AWS provider to receive OCI keys during init.
       - name: Terraform Init
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
-          # FIXED: OCI Customer Secret Keys for the S3-compatible state backend.
-          # These are NOT your AWS creds — different key pair generated in
-          # OCI Console -> Profile -> Customer Secret Keys.
-          # GitHub Secrets needed: OCI_STATE_ACCESS_KEY, OCI_STATE_SECRET_KEY
-          # OCI Customer Secret Keys — used ONLY for the S3-compatible state backend
-          AWS_ACCESS_KEY_ID:              ${{ secrets.OCI_STATE_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY:          ${{ secrets.OCI_STATE_SECRET_KEY }}
-          # Pin region to ap-south-1 so the AWS provider doesn't inherit the
-          # OCI region (us-ashburn-1) that leaks from configure-aws-credentials
-          AWS_DEFAULT_REGION:             ap-south-1
-          AWS_REGION:                     ap-south-1
+          AWS_ACCESS_KEY_ID:     ${{ secrets.OCI_STATE_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.OCI_STATE_SECRET_KEY }}
+          AWS_DEFAULT_REGION:    ap-south-1
+          AWS_REGION:            ap-south-1
           TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
           TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
@@ -70,17 +59,18 @@ jobs:
           TF_VAR_azure_client_secret:     ${{ secrets.AZURE_CLIENT_SECRET }}
           TF_VAR_azure_subscription_id:   ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           TF_VAR_alert_email:             ${{ secrets.ALERT_EMAIL }}
-        run: terraform init
+        run: terraform init -reconfigure
 
+      # Plan uses real AWS creds — OCI state keys are no longer needed after init.
       - name: Terraform Plan
-        id: plan                     # FIXED: id was missing — PR comment had no output
+        id: plan
         working-directory: ${{ env.TF_WORKING_DIR }}
-        continue-on-error: true      # FIXED: comment posts even when plan fails
+        continue-on-error: true
         env:
-          AWS_ACCESS_KEY_ID:              ${{ secrets.OCI_STATE_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY:          ${{ secrets.OCI_STATE_SECRET_KEY }}
-          AWS_DEFAULT_REGION:             ap-south-1
-          AWS_REGION:                     ap-south-1
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION:    ap-south-1
+          AWS_REGION:            ap-south-1
           TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
           TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
@@ -139,13 +129,6 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ap-south-1   # hardcoded — region is not sensitive
-
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
@@ -154,13 +137,10 @@ jobs:
       - name: Terraform Init
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
-          # OCI Customer Secret Keys — used ONLY for the S3-compatible state backend
-          AWS_ACCESS_KEY_ID:              ${{ secrets.OCI_STATE_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY:          ${{ secrets.OCI_STATE_SECRET_KEY }}
-          # Pin region to ap-south-1 so the AWS provider doesn't inherit the
-          # OCI region (us-ashburn-1) that leaks from configure-aws-credentials
-          AWS_DEFAULT_REGION:             ap-south-1
-          AWS_REGION:                     ap-south-1
+          AWS_ACCESS_KEY_ID:     ${{ secrets.OCI_STATE_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.OCI_STATE_SECRET_KEY }}
+          AWS_DEFAULT_REGION:    ap-south-1
+          AWS_REGION:            ap-south-1
           TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
           TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
@@ -174,13 +154,15 @@ jobs:
           TF_VAR_azure_client_secret:     ${{ secrets.AZURE_CLIENT_SECRET }}
           TF_VAR_azure_subscription_id:   ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           TF_VAR_alert_email:             ${{ secrets.ALERT_EMAIL }}
-        run: terraform init
+        run: terraform init -reconfigure
 
-      - name: Terraform Plan (saved)
+      - name: Terraform Plan + Apply
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
-          AWS_ACCESS_KEY_ID:              ${{ secrets.OCI_STATE_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY:          ${{ secrets.OCI_STATE_SECRET_KEY }}
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION:    ap-south-1
+          AWS_REGION:            ap-south-1
           TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
           TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
