@@ -62,7 +62,6 @@ variable "aws_account_id" {
   type        = string
   sensitive   = true
 }
-
 # ── GCP ──────────────────────────────────────────────────────────────────────
 
 variable "gcp_project_id" {
@@ -184,3 +183,9 @@ variable "oci2_private_key" {
   sensitive = true
 }
 
+
+variable "aws_availability_zone" {
+  description = "AWS availability zone for the vault EC2 and public subnet"
+  type        = string
+  default     = "ap-south-1a"
+}
