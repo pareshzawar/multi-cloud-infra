@@ -91,13 +91,13 @@ output "gcp_instance_name" {
 output "azure_oidc_issuer" {
   description = "OIDC issuer URL — paste into n8n / Uptime Kuma OIDC config"
   value       = module.azure_sso.oidc_issuer_url
-  sensitive = true
+  sensitive   = true
 }
 
 output "azure_oidc_metadata_url" {
   description = "OIDC discovery document URL"
   value       = module.azure_sso.oidc_metadata_url
-  sensitive = true
+  sensitive   = true
 }
 
 output "n8n_oidc_client_id" {
