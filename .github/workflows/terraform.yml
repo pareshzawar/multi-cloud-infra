@@ -48,6 +48,12 @@ jobs:
           AWS_REGION:            ap-south-1
           TF_VAR_aws_region:     ap-south-1
           TF_VAR_aws_account_id:          ${{ secrets.AWS_ACCOUNT_ID }}
+          TF_VAR_domain_name:             ${{ secrets.DOMAIN_NAME }}
+          TF_VAR_gcp_project_id:          ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_gcp_billing_account_id:  ${{ secrets.GCP_BILLING_ACCOUNT_ID }}
+          TF_VAR_oci_compartment_id:      ${{ secrets.OCI_COMPARTMENT_ID }}
+          TF_VAR_oci_availability_domain: ${{ secrets.OCI_AVAILABILITY_DOMAIN }}
+          TF_VAR_ssh_public_key:          ${{ secrets.SSH_PUBLIC_KEY }}
           TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
           TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
@@ -82,6 +88,12 @@ jobs:
           AWS_REGION:            ap-south-1
           TF_VAR_aws_region:     ap-south-1
           TF_VAR_aws_account_id:          ${{ secrets.AWS_ACCOUNT_ID }}
+          TF_VAR_domain_name:             ${{ secrets.DOMAIN_NAME }}
+          TF_VAR_gcp_project_id:          ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_gcp_billing_account_id:  ${{ secrets.GCP_BILLING_ACCOUNT_ID }}
+          TF_VAR_oci_compartment_id:      ${{ secrets.OCI_COMPARTMENT_ID }}
+          TF_VAR_oci_availability_domain: ${{ secrets.OCI_AVAILABILITY_DOMAIN }}
+          TF_VAR_ssh_public_key:          ${{ secrets.SSH_PUBLIC_KEY }}
           TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
           TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
@@ -161,6 +173,12 @@ jobs:
           AWS_REGION:            ap-south-1
           TF_VAR_aws_region:     ap-south-1
           TF_VAR_aws_account_id:          ${{ secrets.AWS_ACCOUNT_ID }}
+          TF_VAR_domain_name:             ${{ secrets.DOMAIN_NAME }}
+          TF_VAR_gcp_project_id:          ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_gcp_billing_account_id:  ${{ secrets.GCP_BILLING_ACCOUNT_ID }}
+          TF_VAR_oci_compartment_id:      ${{ secrets.OCI_COMPARTMENT_ID }}
+          TF_VAR_oci_availability_domain: ${{ secrets.OCI_AVAILABILITY_DOMAIN }}
+          TF_VAR_ssh_public_key:          ${{ secrets.SSH_PUBLIC_KEY }}
           TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
           TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
@@ -192,6 +210,12 @@ jobs:
           AWS_REGION:            ap-south-1
           TF_VAR_aws_region:     ap-south-1
           TF_VAR_aws_account_id:          ${{ secrets.AWS_ACCOUNT_ID }}
+          TF_VAR_domain_name:             ${{ secrets.DOMAIN_NAME }}
+          TF_VAR_gcp_project_id:          ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_gcp_billing_account_id:  ${{ secrets.GCP_BILLING_ACCOUNT_ID }}
+          TF_VAR_oci_compartment_id:      ${{ secrets.OCI_COMPARTMENT_ID }}
+          TF_VAR_oci_availability_domain: ${{ secrets.OCI_AVAILABILITY_DOMAIN }}
+          TF_VAR_ssh_public_key:          ${{ secrets.SSH_PUBLIC_KEY }}
           TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
           TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
           TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
