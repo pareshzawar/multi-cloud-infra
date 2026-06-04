@@ -57,7 +57,7 @@ provider "aws" {
 provider "google" {
   project               = var.gcp_project_id
   region                = var.gcp_region
-  billing_project       = var.gcp_project_id   # FIX 7: was hardcoded "cloudexplorersclub"
+  billing_project       = var.gcp_project_id # FIX 7: was hardcoded "cloudexplorersclub"
   user_project_override = true
 }
 
@@ -106,10 +106,10 @@ module "oci_networking" {
 module "oci_security" {
   source = "../../modules/oci-security"
 
-  compartment_id    = var.oci_compartment_id
-  vcn_id            = module.oci_networking.vcn_id
-  public_subnet_id  = module.oci_networking.public_subnet_id
-  private_subnet_id = module.oci_networking.private_subnet_id
+  compartment_id      = var.oci_compartment_id
+  vcn_id              = module.oci_networking.vcn_id
+  public_subnet_id    = module.oci_networking.public_subnet_id
+  private_subnet_id   = module.oci_networking.private_subnet_id
   admin_allowed_cidrs = var.admin_allowed_cidrs
 
   tags = local.common_tags
@@ -188,8 +188,8 @@ module "oci_micro2" {
   availability_domain = var.oci_availability_domain
   private_subnet_id   = module.oci_networking.private_subnet_id
   micro2_nsg_id       = module.oci_security.micro2_nsg_id
+  ssh_public_key      = var.ssh_public_key
 
-  ssh_public_key     = var.ssh_public_key
   tailscale_auth_key = var.tailscale_auth_key
   domain_name        = var.domain_name
   alert_email        = var.alert_email
@@ -224,7 +224,6 @@ module "aws_vault" {
   source = "../../modules/aws-vault"
 
   aws_region         = var.aws_region
-  ssh_public_key     = var.ssh_public_key
   vpc_cidr           = "172.16.0.0/16"
   public_subnet_cidr = "172.16.1.0/24"
   availability_zone  = var.aws_availability_zone
@@ -255,12 +254,13 @@ module "aws_budget" {
 module "gcp_gateway" {
   source = "../../modules/gcp-gateway"
 
-  project_id = var.gcp_project_id
-  region     = var.gcp_region
-  zone       = var.gcp_zone
+  project_id            = var.gcp_project_id
+  region                = var.gcp_region
+  zone                  = var.gcp_zone
+  ssh_public_key        = var.ssh_public_key
+  uptime_kuma_subdomain = var.uptime_kuma_subdomain
 
   vpc_cidr           = "192.168.1.0/24"
-  ssh_public_key     = var.ssh_public_key
   tailscale_auth_key = var.tailscale_auth_key
   oci_tailscale_ip   = var.oci_tailscale_ip
   domain_name        = var.domain_name

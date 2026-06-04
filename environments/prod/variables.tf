@@ -172,3 +172,15 @@ variable "oci_tailscale_ip" {
   type        = string
   default     = "" # Leave empty on first apply; fill in after Tailscale joins
 }
+
+variable "uptime_kuma_subdomain" {
+  description = "Subdomain for Uptime Kuma status page (proxied via GCP NPM)"
+  type        = string
+  default     = "status"
+}
+
+variable "oci2_private_key" {
+  type      = string
+  sensitive = true
+}
+
