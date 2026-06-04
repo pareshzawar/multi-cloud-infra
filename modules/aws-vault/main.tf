@@ -155,6 +155,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "backup" {
     id     = "expire-old-backups"
     status = "Enabled"
 
+    filter {}
+
     expiration {
       days = 30
     }
