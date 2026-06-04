@@ -67,7 +67,7 @@ jobs:
           TF_VAR_azure_client_secret:     ${{ secrets.AZURE_CLIENT_SECRET }}
           TF_VAR_azure_subscription_id:   ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           TF_VAR_alert_email:             ${{ secrets.ALERT_EMAIL }}
-        run: terraform init -reconfigure
+        run: terraform init -reconfigure -backend-config="access_key=${{ secrets.OCI_STATE_ACCESS_KEY }}" -backend-config="secret_key=${{ secrets.OCI_STATE_SECRET_KEY }}"
 
       # Plan uses real AWS creds — OCI state keys are no longer needed after init.
       - name: Terraform Plan
@@ -178,7 +178,7 @@ jobs:
           TF_VAR_azure_client_secret:     ${{ secrets.AZURE_CLIENT_SECRET }}
           TF_VAR_azure_subscription_id:   ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           TF_VAR_alert_email:             ${{ secrets.ALERT_EMAIL }}
-        run: terraform init -reconfigure
+        run: terraform init -reconfigure -backend-config="access_key=${{ secrets.OCI_STATE_ACCESS_KEY }}" -backend-config="secret_key=${{ secrets.OCI_STATE_SECRET_KEY }}"
 
       - name: Terraform Plan + Apply
         working-directory: ${{ env.TF_WORKING_DIR }}
