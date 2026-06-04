@@ -25,10 +25,10 @@ terraform {
   backend "s3" {
     bucket = "terraform-state-multicloud"
     key    = "prod/terraform.tfstate"
-    region = "us-ashburn-1"
+    region = "ap-hyderabad-1"
 
     endpoints = {
-      s3 = "https://idkl5fdwo72e.compat.objectstorage.us-ashburn-1.oraclecloud.com"
+      s3 = "https://axhnniwa9lf0.compat.objectstorage.ap-hyderabad-1.oraclecloud.com"
     }
 
     skip_credentials_validation = true
