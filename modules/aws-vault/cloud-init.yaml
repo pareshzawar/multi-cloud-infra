@@ -1,0 +1,67 @@
+#!/bin/bash
+set -euo pipefail
+
+# ── System update ──────────────────────────────────────────────
+apt-get update && apt-get upgrade -y
+apt-get install -y curl wget git ufw fail2ban unattended-upgrades sqlite3 awscli
+
+# ── Swapfile (critical for 1 GB RAM) ───────────────────────────
+fallocate -l 2G /swapfile
+chmod 600 /swapfile
+mkswap /swapfile
+swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+echo 'vm.swappiness=10' >> /etc/sysctl.conf
+sysctl -p
+
+# ── Docker ─────────────────────────────────────────────────────
+curl -fsSL https://get.docker.com | sh
+usermod -aG docker ubuntu
+systemctl enable docker && systemctl start docker
+
+# ── Tailscale ──────────────────────────────────────────────────
+curl -fsSL https://tailscale.com/install.sh | sh
+tailscale up --authkey=${tailscale_auth_key} --hostname=${tailscale_hostname} --accept-routes
+systemctl enable tailscaled
+
+# ── Wait for Tailscale IP ──────────────────────────────────────
+sleep 10
+TS_IP=$(tailscale ip -4)
+echo "Tailscale IP: $TS_IP"
+
+# ── Vaultwarden via Docker ─────────────────────────────────────
+mkdir -p /opt/vaultwarden/data
+chown -R ubuntu:ubuntu /opt/vaultwarden
+
+cat > /opt/vaultwarden/docker-compose.yml << COMPOSE
+version: '3.8'
+services:
+  vaultwarden:
+    image: vaultwarden/server:latest
+    container_name: vaultwarden
+    restart: unless-stopped
+    environment:
+      ROCKET_ADDRESS: "$${TS_IP}"
+      ROCKET_PORT: "8080"
+      DOMAIN: "http://$${TS_IP}:8080"
+      SIGNUPS_ALLOWED: "false"
+      WEBSOCKET_ENABLED: "true"
+      LOG_LEVEL: "warn"
+    volumes:
+      - /opt/vaultwarden/data:/data
+    ports:
+      - "$${TS_IP}:8080:80"
+COMPOSE
+
+cd /opt/vaultwarden && docker compose up -d
+
+# ── S3 backup cron (region: ${aws_region}, bucket: ${backup_bucket_name}) ──
+cat > /opt/vaultwarden/backup.sh << 'BACKUP'
+#!/bin/bash
+set -e
+sqlite3 /opt/vaultwarden/data/db.sqlite3 ".backup '/tmp/vault-backup.sqlite3'"
+aws s3 cp /tmp/vault-backup.sqlite3 s3://${backup_bucket_name}/db-$(date +%F).sqlite3 --region ${aws_region}
+rm -f /tmp/vault-backup.sqlite3
+BACKUP
+chmod +x /opt/vaultwarden/backup.sh
+echo "0 3 * * * root /opt/vaultwarden/backup.sh" > /etc/cron.d/vault-backup
