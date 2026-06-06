@@ -78,7 +78,7 @@ variable "gcp_billing_account_id" {
 variable "gcp_region" {
   description = "GCP region — MUST be us-central1, us-east1, or us-west1 for Always Free e2-micro"
   type        = string
-  default     = "us-central1"
+  default     = "us-west1"
 
   validation {
     condition     = contains(["us-central1", "us-east1", "us-west1"], var.gcp_region)
@@ -89,7 +89,7 @@ variable "gcp_region" {
 variable "gcp_zone" {
   description = "GCP region — MUST be us-central1, us-east1, or us-west1 for Always Free e2-micro"
   type        = string
-  default     = "us-east1-b"
+  default     = "us-west1-a"
 
 }
 

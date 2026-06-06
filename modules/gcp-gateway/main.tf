@@ -148,7 +148,7 @@ resource "google_compute_instance" "gateway" {
 
   lifecycle {
     prevent_destroy = true
-    ignore_changes  = [metadata["user-data"]]
+    ignore_changes = [metadata["user-data"], boot_disk[0].initialize_params[0].image]
   }
 }
 
