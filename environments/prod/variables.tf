@@ -158,7 +158,7 @@ variable "admin_allowed_cidrs" {
 variable "github_org" {
   description = "GitHub username or org name for tagging"
   type        = string
-  default     = "your-github-username"
+  default     = "pareshzawar"
 }
 
 variable "github_repo" {

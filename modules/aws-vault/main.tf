@@ -2,20 +2,18 @@
 # modules/aws-vault/main.tf
 # The Vault — isolated AWS account for Vaultwarden
 #
-# CHANGES (feat/remove-nat-gateway):
-#   REMOVED  aws_nat_gateway             — was ~$40.32/month in ap-south-1
-#   REMOVED  aws_eip                     — was ~$3.60/month
-#   REMOVED  aws_subnet.private          — no longer needed
-#   REMOVED  aws_route_table.private     — no longer needed
-#   CHANGED  aws_instance subnet_id      → aws_subnet.public
-#   CHANGED  associate_public_ip_address = true (outbound via IGW directly)
-#   CHANGED  sse_algorithm               → AES256 (was aws:kms, $1/month)
+# NAT REMOVAL — ROUTE-FLIP APPROACH (instance is NEVER replaced):
+#   · Instance stays in its existing subnet (subnet-0ed3906bbcff7788d).
+#   · That subnet's route table default route is flipped NAT -> IGW.
+#   · An Elastic IP is associated to the RUNNING instance (in-place) so it
+#     has a public IP for outbound via the IGW. Vaultwarden is NOT exposed.
+#   · NAT Gateway + its EIP are removed (the ~$44/month saving).
+#   · S3 SSE changed aws:kms -> AES256 (free).
 #
-# SECURITY POSTURE: UNCHANGED
-#   · Vaultwarden binds to Tailscale IP only (ROCKET_ADDRESS=$TS_IP)
-#   · Security group has ZERO inbound rules for :8080
-#   · UFW blocks all ports except 22 (Tailscale SSH) and Tailscale UDP
-#   · Public IP on EC2 = outbound internet only; nothing listens on it
+# CRITICAL — every value below matches live state to avoid replacement:
+#   subnet_id, associate_public_ip_address=false, key_name, SG name/description.
+#   Do NOT "tidy" the subnet name, SG description, or IGW resource name —
+#   each is ForceNew and would destroy the vault.
 ###############################################################################
 
 data "aws_ami" "ubuntu_22" {
@@ -44,37 +42,63 @@ resource "aws_vpc" "vault" {
 }
 
 # ── Internet Gateway ──────────────────────────────────────────────────────────
+# Resource name MUST stay "igw" to match state (igw-02ae33e6cbd85ac84).
 
-resource "aws_internet_gateway" "vault" {
+resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.vault.id
   tags   = merge(var.tags, { Name = "vault-igw" })
 }
 
-# ── Public Subnet ─────────────────────────────────────────────────────────────
-# EC2 lives here directly — no NAT Gateway needed.
-# Public IP is used for outbound only (apt, Docker pulls, Tailscale).
-# Vaultwarden does NOT listen on the public IP.
+# ── Subnets ───────────────────────────────────────────────────────────────────
+# CIDRs/AZ hardcoded to match the live subnets exactly. The instance lives in
+# aws_subnet.private; after the route flip that subnet reaches the internet via
+# the IGW. (Name kept as "private" to match state — rename later via a moved
+# block, never by editing here.)
 
-resource "aws_subnet" "public" {
-  vpc_id                  = aws_vpc.vault.id
-  cidr_block              = var.public_subnet_cidr
-  availability_zone       = var.availability_zone
-  map_public_ip_on_launch = false # controlled explicitly on the instance
+resource "aws_subnet" "private" {
+  vpc_id            = aws_vpc.vault.id
+  cidr_block        = "172.16.1.0/24" # subnet-0ed3906bbcff7788d — DO NOT CHANGE (instance lives here)
+  availability_zone = "ap-south-1a"
 
-  tags = merge(var.tags, { Name = "vault-subnet-public" })
+  tags = merge(var.tags, { Name = "vault-private-subnet" })
 }
 
-# ── Route Table ───────────────────────────────────────────────────────────────
+resource "aws_subnet" "public" {
+  vpc_id            = aws_vpc.vault.id
+  cidr_block        = "172.16.2.0/24" # subnet-01a4ad662701b0060 — kept; empty after NAT removal
+  availability_zone = "ap-south-1a"
+
+  tags = merge(var.tags, { Name = "vault-public-subnet" })
+}
+
+# ── Route Tables ──────────────────────────────────────────────────────────────
+
+# Instance's route table — THE FLIP: default route now via IGW (was NAT GW).
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.vault.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.igw.id # was: nat_gateway_id = aws_nat_gateway.nat.id
+  }
+
+  tags = merge(var.tags, { Name = "vault-private-rt" })
+}
 
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.vault.id
 
   route {
     cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.vault.id
+    gateway_id = aws_internet_gateway.igw.id
   }
 
-  tags = merge(var.tags, { Name = "vault-rt-public" })
+  tags = merge(var.tags, { Name = "vault-public-rt" })
+}
+
+resource "aws_route_table_association" "private" {
+  subnet_id      = aws_subnet.private.id
+  route_table_id = aws_route_table.private.id
 }
 
 resource "aws_route_table_association" "public" {
@@ -82,16 +106,37 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# ── Elastic IP for the running instance (replaces NAT egress) ──────────────────
+# Associated to the existing instance/ENI — in-place, NO replacement.
+
+resource "aws_eip" "vault" {
+  domain = "vpc"
+  tags   = merge(var.tags, { Name = "vault-eip" })
+}
+
+resource "aws_eip_association" "vault" {
+  instance_id   = aws_instance.vault.id
+  allocation_id = aws_eip.vault.id
+}
+
 # ── Security Group ────────────────────────────────────────────────────────────
-# Inbound: SSH (Tailscale-only at runtime — UFW enforces) + Tailscale UDP
-# NO inbound rule for :8080 — Vaultwarden is zero public exposure
+# name + description + ingress MUST match state — description is ForceNew, and a
+# new public IP makes any 0.0.0.0/0 service port a real exposure. SSH stays
+# scoped to the Tailscale CGNAT range.
 
 resource "aws_security_group" "vault" {
   name        = "vault-sg"
-  description = "Vaultwarden EC2 — Tailscale access only, no public service ports"
+  description = "Vaultwarden - Tailscale only, no public Vaultwarden port"
   vpc_id      = aws_vpc.vault.id
 
-  # Tailscale UDP (WireGuard-based mesh)
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["100.64.0.0/10"]
+    description = "SSH via Tailscale"
+  }
+
   ingress {
     from_port   = 41641
     to_port     = 41641
@@ -100,16 +145,6 @@ resource "aws_security_group" "vault" {
     description = "Tailscale UDP"
   }
 
-  # SSH — open at SG level; UFW on the instance restricts to Tailscale IP
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "SSH (UFW restricts to Tailscale IP at OS level)"
-  }
-
-  # All outbound allowed — needed for apt, Docker, Tailscale coordination
   egress {
     from_port   = 0
     to_port     = 0
@@ -117,7 +152,15 @@ resource "aws_security_group" "vault" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = merge(var.tags, { Name = "vault-sg" })
+  tags = merge(var.tags, { Name = "vault-security-group" })
+}
+
+# ── SSH key pair (restored — its absence was forcing an SSH lockout) ───────────
+
+resource "aws_key_pair" "vault" {
+  key_name   = "vault-key"
+  public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA5N9dM0U7h4X4tyUBYd+IhWfpvyHLT2Ul8vGJPoNTJl multi-cloud-infra"
+  tags       = var.tags
 }
 
 # ── S3 Backup Bucket ──────────────────────────────────────────────────────────
@@ -142,8 +185,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "backup" {
 
   rule {
     apply_server_side_encryption_by_default {
-      # AES256 = S3-managed encryption, free. Was aws:kms ($1/month).
-      sse_algorithm = "AES256"
+      sse_algorithm = "AES256" # was aws:kms ($1/month)
     }
   }
 }
@@ -221,16 +263,17 @@ resource "aws_iam_instance_profile" "vault_ec2" {
 }
 
 # ── EC2 Instance ──────────────────────────────────────────────────────────────
-# Moved to public subnet — outbound via IGW directly (no NAT GW).
-# associate_public_ip_address = true gives it an ephemeral public IP for
-# outbound traffic only. Vaultwarden is still bound to Tailscale IP.
+# UNCHANGED placement: stays in aws_subnet.private, public IP via EIP (above),
+# associate_public_ip_address=false. key_name restored. All ForceNew attributes
+# match state, so this plans as in-place (tags only) — never replaced.
 
 resource "aws_instance" "vault" {
   ami                         = data.aws_ami.ubuntu_22.id
   instance_type               = var.instance_type
-  subnet_id                   = aws_subnet.public.id
+  subnet_id                   = aws_subnet.private.id
   vpc_security_group_ids      = [aws_security_group.vault.id]
   iam_instance_profile        = aws_iam_instance_profile.vault_ec2.name
+  key_name                    = aws_key_pair.vault.key_name
   associate_public_ip_address = true
 
   root_block_device {
