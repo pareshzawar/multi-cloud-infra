@@ -42,3 +42,7 @@ github_repo = "multi-cloud-infra"
 
 # Set this AFTER first deploy — run `tailscale ip -4` on OCI server
 oci_tailscale_ip = ""  # e.g. "100.64.0.1"
+
+# Azure: create the Entra ID app registrations with Terraform? Needs the
+# Application.ReadWrite.All permission. false = do it by hand (MANUAL_SETUP.md)
+azure_sso_create_apps = false

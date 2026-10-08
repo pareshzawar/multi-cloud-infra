@@ -8,7 +8,7 @@
 #   az login --tenant YOUR_TENANT_ID --allow-no-subscriptions
 #   az ad sp create-for-rbac --name "terraform-sp" --role "Application.ReadWrite.All"
 #
-# create_apps defaults to false (root var azure_create_apps). With false,
+# create_apps defaults to false (root var azure_sso_create_apps). With false,
 # nothing is created here and the outputs return "SET_MANUALLY_FROM_PORTAL";
 # create the apps by hand — see MANUAL_SETUP.md in the repo root.
 #

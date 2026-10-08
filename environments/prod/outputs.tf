@@ -181,7 +181,7 @@ output "next_steps" {
        Default login: admin@example.com / changeme → CHANGE IMMEDIATELY
        Add proxy hosts → forward to OCI A1 via its Tailscale IP
 
-    7. AZURE SSO (only if azure_create_apps = true, else MANUAL_SETUP.md):
+    7. AZURE SSO (only if azure_sso_create_apps = true, else MANUAL_SETUP.md):
        portal.azure.com → Entra ID → Enterprise Applications
        For each app: Permissions → Grant admin consent
 

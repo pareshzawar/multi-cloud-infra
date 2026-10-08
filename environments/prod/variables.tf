@@ -200,7 +200,7 @@ variable "oci_private_key" {
   sensitive   = true
 }
 
-variable "azure_create_apps" {
+variable "azure_sso_create_apps" {
   description = "Create the Entra ID app registrations with Terraform (needs Application.ReadWrite.All). false = create them by hand, see MANUAL_SETUP.md"
   type        = bool
   default     = false

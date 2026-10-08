@@ -1,7 +1,14 @@
 # 🏗️ Multi-Cloud Zero-Cost Infrastructure — Plan B
 
 > **OCI Ampere A1 · OCI E2.1.Micro · AWS t2/t3.micro · GCP e2-micro**
-> Defense-in-Depth · Tailscale Mesh · Azure Entra SSO · Full Terraform IaC
+> Defense-in-Depth · Tailscale Mesh · Azure Entra ID · Full Terraform IaC
+
+> **Status: archived lab snapshot (June 2026), reviewed and corrected in a
+> later pass.** The code passes `terraform fmt -check` and `terraform validate`
+> in CI, and every boot script renders and parses. It has **not** been
+> re-applied end-to-end since those fixes. CI never provisions anything on
+> its own (see [CI/CD safety](#cicd-safety)). What is still open is listed
+> under [Known issues & lessons learned](#known-issues--lessons-learned).
 
 ## Architecture
 
@@ -25,8 +32,7 @@ GCP e2-micro ──── Public Gateway only (Nginx Proxy Manager)
    │  └── Caddy (TLS)
    │
    ▼
-Azure Entra ID (Free OIDC SSO)
-   └── Secures: n8n · Uptime Kuma · WireGuard Admin
+Azure Entra ID (optional OIDC app registrations — not enforced, see Known issues)
 ```
 
 ## What's Included
@@ -42,14 +48,14 @@ Azure Entra ID (Free OIDC SSO)
 | Vault | Vaultwarden on isolated t2/t3.micro, Tailscale-only | AWS |
 | Backups | S3 bucket (encrypted) for Vaultwarden DB | AWS |
 | Gateway | Nginx Proxy Manager on e2-micro (NPM only — lean) | GCP |
-| Monitoring | Uptime Kuma on OCI Micro #2 (same VCN as A1 — lower latency) | OCI |
+| Monitoring | Uptime Kuma on OCI Micro #2, tailnet-only via `tailscale serve` | OCI |
 | Docker GUI | Portainer CE on OCI Micro #2 | OCI |
 | Auto-updates | Watchtower on OCI Micro #2 (centralised) | OCI |
 | CDN | Cloudflare (managed via Terraform) | Cloudflare |
-| SSO | Azure Entra ID OIDC — secures n8n, Uptime Kuma, WireGuard UI | Azure |
-| Budget Alerts | $1 threshold alerts with email notifications | OCI + AWS + GCP |
+| Identity | Azure Entra ID OIDC app registrations (optional; not enforced by the apps yet) | Azure |
+| Budget Alerts | $1 (OCI, AWS) / ₹1 (GCP) threshold alerts by email | OCI + AWS + GCP |
 | IaC | Full Terraform — all resources declarative | All |
-| CI/CD | GitHub Actions — `terraform plan` on PR, `apply` on merge to main | GitHub |
+| CI/CD | GitHub Actions — `validate` on PR/merge; plan/apply manual + approval only | GitHub |
 
 ## CIDR Addressing Plan
 
@@ -59,7 +65,7 @@ Azure Entra ID (Free OIDC SSO)
 | OCI Public Subnet | `10.0.1.0/24` | Load Balancer only |
 | OCI Private Subnet | `10.0.2.0/24` | Ampere A1 + E2.1.Micro #2 |
 | AWS VPC | `172.16.0.0/16` | Vault network |
-| AWS Private Subnet | `172.16.1.0/24` | Vaultwarden |
+| AWS Vault Subnet | `172.16.1.0/24` | Vaultwarden (IGW + Elastic IP, no service ports) |
 | GCP VPC | `192.168.1.0/24` | Gateway |
 | Tailscale Mesh | `100.64.0.0/10` | Inter-cloud private |
 | WireGuard Clients | `10.8.0.0/24` | VPN client IPs |
@@ -75,7 +81,7 @@ brew install terraform   # macOS
 
 # Install required CLIs
 brew install oci-cli awscli
-pip install --user google-cloud-sdk
+brew install --cask google-cloud-sdk   # or: https://cloud.google.com/sdk/docs/install
 
 # Authenticate all providers
 oci setup config
@@ -94,10 +100,13 @@ cp environments/prod/terraform.tfvars.example environments/prod/terraform.tfvars
 
 ```bash
 cd environments/prod
-terraform init
-terraform plan
+terraform init      # needs the OCI state keys, see backend.tf
+terraform plan      # READ this before applying
 terraform apply
 ```
+
+Or use the manual GitHub Actions workflow (plan, then approved apply) — see
+[CI/CD safety](#cicd-safety).
 
 ## Repository Structure
 
@@ -120,9 +129,11 @@ infra/
     ├── oci-lb/                   # Flexible LB + HTTP→HTTPS + WireGuard NLB
     ├── oci-compute/              # Ampere A1 — apps (n8n, Motibot, Ghost, WG, Caddy)
     ├── oci-micro2/               # E2.1.Micro #2 — ops (Uptime Kuma, Portainer, Watchtower)
+    ├── oci-compute2/             # Tenancy 2 — overflow worker + Vaultwarden standby
     ├── oci-budget/               # OCI budget alert at $1
-    ├── aws-vault/                # VPC, EC2 private, S3 encrypted, IAM for Vaultwarden
-    ├── aws-budget/               # AWS budget: 50%/100% actual + forecast + CloudWatch
+    ├── remote-state-bootstrap/   # One-off: state bucket + S3-compatible keys
+    ├── aws-vault/                # VPC, EC2 + Elastic IP, S3 encrypted, IAM/SSM for Vaultwarden
+    ├── aws-budget/               # AWS budgets: 50%/100% actual + forecast → email + SNS
     ├── gcp-gateway/              # VPC, e2-micro, Nginx Proxy Manager only (lean)
     ├── gcp-budget/               # GCP budget: 50%/90%/100% actual + forecast
     └── azure-sso/                # Entra ID OIDC apps: n8n, Uptime Kuma, WireGuard
@@ -130,12 +141,13 @@ infra/
 
 ## Security Notes
 
-- Vaultwarden has **zero public ports** — bound to Tailscale IP only
-- OCI compute lives in **private subnet** — only reachable via Load Balancer
-- NSGs use **allow-list model** — deny all by default, explicit allows only
-- All inter-cloud traffic goes through **Tailscale encrypted mesh**
-- Secrets are in `terraform.tfvars` which is **git-ignored**
-- State file is stored in **OCI Object Storage** (free) with state locking
+- Vaultwarden has **zero public ports** — localhost-bound, published to the tailnet with `tailscale serve`
+- OCI compute lives in **private subnets** — public traffic only via the load balancers
+- Security lists **and** NSGs use an **allow-list model**; both are attached
+- GCP gateway accepts 80/443 **from Cloudflare only**
+- All inter-cloud traffic goes through the **Tailscale encrypted mesh**
+- Secrets are in `terraform.tfvars` (git-ignored) or GitHub Secrets
+- State is stored in **OCI Object Storage** (free, versioned) — **no state locking**, see Known issues
 
 ## Azure SSO — What's Free
 
@@ -150,12 +162,91 @@ What requires paid tier (P1/P2):
 - Identity Protection
 - Privileged Identity Management
 
-For this stack, the **free tier is sufficient** — OIDC SSO protects all admin UIs.
+The free tier is enough to *register* the apps. Enforcing SSO is a separate
+problem: see Known issues. App creation is off by default
+(`azure_sso_create_apps = false`); see MANUAL_SETUP.md for the portal route.
 
 ## Budget Alerts Summary
 
 | Cloud | Alert Threshold | Notification |
 |---|---|---|
 | OCI | $1.00 / month | Email |
-| AWS | $1.00 / month | Email (CloudWatch) |
-| GCP | $1.00 / month | Email (Budget API) |
+| AWS | $1.00 / month | Email + SNS (AWS Budgets) |
+| GCP | ₹1 / month (billing account is INR) | Email (Budget API) |
+
+## CI/CD safety
+
+Opening or merging a PR **cannot create, change or destroy infrastructure**.
+
+| Trigger | What runs | Cloud credentials |
+|---|---|---|
+| Pull request → `main` | `fmt -check`, `init -backend=false`, `validate` | none |
+| Push / merge to `main` | same as above | none |
+| Manual run, `action=plan` | `terraform plan` (read-only) | yes |
+| Manual run, `action=apply` + `confirm=APPLY`, from `main` | plan → **production environment approval** → `apply` of that exact saved plan | yes |
+
+## Known issues & lessons learned
+
+A later review found and fixed the bugs listed in the commit history (the
+stack did not pass `terraform validate`, WireGuard could not connect,
+several boot scripts aborted, and more). The items below are **still open**,
+mostly design trade-offs. They are kept here on purpose, as notes for whoever
+picks this up.
+
+**Architecture**
+- **Two TLS front doors for the same hostnames.** DNS points `@`, `www`,
+  `n8n` and `status` at the GCP Nginx Proxy Manager, while Caddy on OCI A1
+  also tries to get Let's Encrypt certificates for those names through the
+  OCI load balancer. Only one can win an HTTP-01 challenge. Pick one: either
+  NPM terminates TLS and proxies to A1 over Tailscale, or DNS points at the
+  OCI LB and the GCP hop goes away.
+- **SSO is not enforced.** n8n's OIDC login needs an Enterprise licence;
+  Uptime Kuma and wg-easy have no OIDC support. Admin UIs are protected by
+  Tailscale (tailnet-only) and Caddy basic auth instead. Real SSO would mean
+  putting something like `oauth2-proxy` in front of them.
+- **No Terraform state locking.** The S3-compatible OCI backend has no lock
+  table, and Terraform 1.7 has no `use_lockfile`. CI serialises runs with a
+  `concurrency` group; local runs must not overlap with CI.
+
+**Secrets and supply chain**
+- The Tailscale auth key is rendered into instance user-data, so it sits in
+  instance metadata and in Terraform state. Prefer short-lived, tagged,
+  pre-approved keys, or pull secrets from a vault at boot.
+- One reusable Tailscale key is shared by every node, and no tailnet ACLs or
+  tags are defined.
+- Hosts bootstrap with `curl … | sh` installers (Docker, Tailscale, rclone).
+- Several images float (`n8nio/n8n:latest`, `motibot/motibot:latest`,
+  `jc21/nginx-proxy-manager:latest`, `containrrr/watchtower:latest`), and
+  Watchtower auto-updates them. `motibot/motibot` is not verified to exist.
+  Pin digests for reproducibility.
+
+**Hardening still to do**
+- Tenancy-2 instances have public IPs with SSH open to `0.0.0.0/0` (key-only).
+  Restrict it to Tailscale once the mesh is proven.
+- Vaultwarden starts with `SIGNUPS_ALLOWED=true` (tailnet-only) until you
+  flip it after creating your account.
+- `aws-vault` hard-codes its SSH public key and subnet layout on purpose, to
+  match live state without forcing a replacement.
+
+**Cost and lifecycle**
+- AWS charges for public IPv4 addresses, including Elastic IPs, beyond the
+  free-tier allowance. The t3.micro free tier is time-limited; tenancy 2 is
+  the planned landing spot for Vaultwarden (see `oci-compute2`).
+- GCP VPC flow logs (50% sampling) go to Cloud Logging and can exceed the
+  free allotment on a busy gateway.
+- Ubuntu 22.04 standard support ends in April 2027.
+- Always Free Ampere A1 capacity is often unavailable ("out of host
+  capacity") in popular regions.
+
+**If you re-apply this snapshot**
+- Run a manual **plan** first and read it. Expect in-place changes:
+  - security lists get attached to the subnets (the `moved` blocks avoid a
+    recreate);
+  - NSG rules change;
+  - the public `vault` DNS record is deleted;
+  - the GCP VM's service-account scopes change, which **stops and starts**
+    the gateway once.
+- Boot-script fixes only reach new instances. Existing ones ignore
+  `user_data` changes so that `prevent_destroy` holds.
+- Admin UIs need MagicDNS and HTTPS certificates enabled in the Tailscale
+  admin console for `tailscale serve`.

@@ -303,7 +303,7 @@ module "azure_sso" {
   domain_name = var.domain_name
   # Off by default: a personal Entra tenant usually lacks the permission to
   # create app registrations. See MANUAL_SETUP.md.
-  create_apps = var.azure_create_apps
+  create_apps = var.azure_sso_create_apps
 
   n8n_redirect_uri         = "https://n8n.${var.domain_name}/rest/oauth2-credential/callback"
   uptime_kuma_redirect_uri = "https://status.${var.domain_name}/auth/callback"
