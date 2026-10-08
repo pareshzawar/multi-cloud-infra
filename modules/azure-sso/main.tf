@@ -8,10 +8,13 @@
 #   az login --tenant YOUR_TENANT_ID --allow-no-subscriptions
 #   az ad sp create-for-rbac --name "terraform-sp" --role "Application.ReadWrite.All"
 #
-# If that still fails, set var.create_apps = false and create apps manually
-# in portal.azure.com — see MANUAL_SETUP.md in the repo root.
+# create_apps defaults to false (root var azure_create_apps). With false,
+# nothing is created here and the outputs return "SET_MANUALLY_FROM_PORTAL";
+# create the apps by hand — see MANUAL_SETUP.md in the repo root.
 #
-# The manual steps are documented in MANUAL_SETUP.md
+# Honest scope note: these are plain OIDC app registrations. Which apps can
+# actually USE them is limited — n8n SSO needs an Enterprise licence, and
+# Uptime Kuma / wg-easy have no OIDC login. See README "Known issues".
 ###############################################################################
 
 variable "create_apps" {
@@ -32,7 +35,7 @@ resource "azuread_application" "n8n" {
   web {
     redirect_uris = [var.n8n_redirect_uri]
     implicit_grant {
-      id_token_issuance_enabled = true
+      id_token_issuance_enabled = false # auth-code flow; implicit grant not needed
     }
   }
 
@@ -68,7 +71,7 @@ resource "azuread_application" "uptime_kuma" {
   web {
     redirect_uris = [var.uptime_kuma_redirect_uri]
     implicit_grant {
-      id_token_issuance_enabled = true
+      id_token_issuance_enabled = false # auth-code flow; implicit grant not needed
     }
   }
 
@@ -104,7 +107,7 @@ resource "azuread_application" "wireguard" {
   web {
     redirect_uris = [var.wg_redirect_uri]
     implicit_grant {
-      id_token_issuance_enabled = true
+      id_token_issuance_enabled = false # auth-code flow; implicit grant not needed
     }
   }
 

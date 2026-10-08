@@ -4,15 +4,15 @@
 # Second OCI tenancy — TWO AMD E2.1.Micro instances
 # Each OCI tenancy gets 2x E2.1.Micro Always Free — this module provisions both.
 #
-# micro-a: general overflow / n8n worker / cron jobs
-# micro-b: Terraform runner (deploy-from-server, no laptop needed)
+# micro-a: general overflow worker / cron jobs
+# micro-b: Vaultwarden standby + nightly backup aggregator
 #
 # Both instances:
 #   - Join the same Tailscale mesh as Tenancy 1
 #   - Ubuntu 22.04 LTS (AMD x86)
-#   - 1 OCPU / 1 GB RAM each
+#   - 1/8 OCPU (burstable) / 1 GB RAM each
 #   - 50 GB boot volume each
-#   - Public IP (different VCN from Tenancy 1)
+#   - Public IP (different VCN from Tenancy 1); SSH + Tailscale only
 #
 # Provider alias usage in environments/prod/main.tf:
 #
@@ -21,7 +21,7 @@
 #     tenancy_ocid = var.oci2_tenancy_ocid
 #     user_ocid    = var.oci2_user_ocid
 #     fingerprint  = var.oci2_fingerprint
-#     private_key  = file("~/.oci/oci_api_key_2.pem")
+#     private_key  = var.oci2_private_key   # PEM contents via TF_VAR_*
 #     region       = var.oci2_region
 #   }
 #
@@ -148,14 +148,14 @@ resource "oci_core_instance" "micro_a" {
 
   lifecycle {
     prevent_destroy = true
-    ignore_changes  = [source_details[0].source_id]
+    # user_data changes force replacement (blocked by prevent_destroy).
+    ignore_changes = [source_details[0].source_id, metadata["user_data"]]
   }
   freeform_tags = merge(var.tags, { role = "overflow-worker" })
 }
 
-# ── Micro B — Terraform runner / deployment server ────────────────────────────
-# This instance runs terraform apply so you don't need your laptop at all.
-# Access via Tailscale → SSH → run terraform from here.
+# ── Micro B — Vaultwarden standby + backup aggregator ─────────────────────────
+# See the cloud_init_micro_b comment below for the promote-to-active steps.
 
 resource "oci_core_instance" "micro_b" {
   availability_domain = var.availability_domain
@@ -183,9 +183,10 @@ resource "oci_core_instance" "micro_b" {
 
   lifecycle {
     prevent_destroy = true
-    ignore_changes  = [source_details[0].source_id]
+    # user_data changes force replacement (blocked by prevent_destroy).
+    ignore_changes = [source_details[0].source_id, metadata["user_data"]]
   }
-  freeform_tags = merge(var.tags, { role = "terraform-deployer" })
+  freeform_tags = merge(var.tags, { role = "vault-standby" })
 }
 
 # ── Cloud-init: Micro A (overflow worker) ────────────────────────────────────
@@ -197,10 +198,12 @@ locals {
     exec > /var/log/cloud-init-micro-a.log 2>&1
 
     apt-get update && apt-get upgrade -y
-    apt-get install -y curl wget git ufw fail2ban unattended-upgrades \
+    # No ufw: it declares "Breaks: iptables-persistent" (which OCI images use),
+    # so installing both made apt — and, with set -e, this script — fail.
+    apt-get install -y curl wget git fail2ban unattended-upgrades \
                        iptables-persistent netfilter-persistent
 
-    # OCI iptables (must open in addition to security list)
+    # OCI host firewall (must be opened in addition to the security list)
     iptables -I INPUT 6 -m state --state NEW -p tcp  --dport 22    -j ACCEPT
     iptables -I INPUT 6 -m state --state NEW -p udp  --dport 41641 -j ACCEPT
     netfilter-persistent save
@@ -223,35 +226,30 @@ locals {
                  --accept-routes
     systemctl enable tailscaled
 
-    # UFW
-    ufw default deny incoming && ufw default allow outgoing
-    ufw allow 22/tcp && ufw allow 41641/udp
-    ufw --force enable
     systemctl enable fail2ban && systemctl start fail2ban
 
     echo "Micro A bootstrap complete"
   EOF
 
   # ── Cloud-init: Micro B ───────────────────────────────────────────────────
-  # Role: Vaultwarden STANDBY + Webhook relay + Rclone backup aggregator
+  # Role: Vaultwarden STANDBY + backup aggregator
   #
   # STANDBY MODE (default):
-  #   - Vaultwarden installed but NOT started (standby only)
-  #   - Data dir synced nightly from AWS vault via rclone over Tailscale
-  #   - Ready to promote to PRIMARY when AWS free tier expires
+  #   - Vaultwarden defined but NOT started
+  #   - Nightly: newest DB snapshot pulled from the AWS S3 backup bucket
+  #   - Ready to promote to PRIMARY when the AWS free tier ends
   #
-  # ACTIVE MODE (after migration — see VAULT_MIGRATION.md):
-  #   - Start Vaultwarden: docker compose up -d vaultwarden
-  #   - Update DNS vault.yourdomain.com → this server's Tailscale IP
-  #   - Disable sync cron (no longer pulling from AWS)
+  # PROMOTE TO ACTIVE:
+  #   cd /opt/vaultwarden && docker compose up -d vaultwarden
+  #   sudo tailscale serve --bg http://127.0.0.1:8080
+  #   → https://oci2-micro-b-vault-standby.<tailnet>.ts.net (tailnet only)
+  #   then remove the 01:00 sync line from `crontab -u ubuntu -e`
   #
-  # Webhook relay:
-  #   - Receives public inbound webhooks (GitHub, Telegram, Stripe etc.)
-  #   - Forwards to n8n on OCI A1 via Tailscale (keeps n8n off public internet)
+  # Backup aggregator: nightly tarball of the data dir → OCI Object Storage.
   #
-  # Rclone backup aggregator:
-  #   - Pulls /opt/vaultwarden/data from AWS nightly
-  #   - Pushes all backups to OCI Object Storage (Tenancy 2 free tier, 10 GB)
+  # (A public "webhook relay" container used to live here. It was removed: its
+  #  image was unverified, it ran with an empty shared secret, and port 9000
+  #  was never opened in the security list, so it could not have worked.)
 
   cloud_init_micro_b = <<-EOF
     #!/bin/bash
@@ -260,13 +258,15 @@ locals {
 
     # ── System ─────────────────────────────────────────────────────────────
     apt-get update && apt-get upgrade -y
-    apt-get install -y curl wget git ufw fail2ban unattended-upgrades \
-                       iptables-persistent netfilter-persistent python3-pip
+    # No ufw — see micro A above.
+    apt-get install -y curl wget git fail2ban unattended-upgrades \
+                       iptables-persistent netfilter-persistent python3
 
-    # ── OCI iptables (required alongside Security List) ────────────────────
+    # ── OCI host firewall (required alongside the security list) ───────────
+    # Vaultwarden is never exposed on a host port beyond localhost; tailnet
+    # access goes through tailscaled (`tailscale serve`), so only SSH and
+    # Tailscale need inbound rules.
     iptables -I INPUT 6 -m state --state NEW -p tcp  --dport 22    -j ACCEPT
-    iptables -I INPUT 6 -m state --state NEW -p tcp  --dport 8080  -j ACCEPT
-    iptables -I INPUT 6 -m state --state NEW -p tcp  --dport 9000  -j ACCEPT
     iptables -I INPUT 6 -m state --state NEW -p udp  --dport 41641 -j ACCEPT
     netfilter-persistent save
 
@@ -281,117 +281,6 @@ locals {
     usermod -aG docker ubuntu
     systemctl enable docker && systemctl start docker
 
-    # ── Rclone (for nightly sync from AWS + backup to OCI Object Storage) ──
-    curl https://rclone.org/install.sh | bash
-    mkdir -p /home/ubuntu/.config/rclone
-    # NOTE: configure rclone manually after deploy:
-    #   rclone config
-    #   Add remote "aws_vault"  → S3 → your AWS credentials
-    #   Add remote "oci_backup" → S3-compatible → OCI Object Storage credentials
-    cat > /home/ubuntu/.config/rclone/rclone.conf << 'RCLONE'
-    # Placeholder — run "rclone config" to set up:
-    #   1. "aws_vault"  — S3 remote pointing to your vaultwarden-backup bucket
-    #   2. "oci_backup" — OCI Object Storage S3-compatible endpoint
-    RCLONE
-    chown -R ubuntu:ubuntu /home/ubuntu/.config/rclone
-
-    # ── App directories ─────────────────────────────────────────────────────
-    mkdir -p /opt/vaultwarden/data
-    mkdir -p /opt/webhook-relay
-    chown -R ubuntu:ubuntu /opt/vaultwarden /opt/webhook-relay
-
-    # ── Docker Compose — all services ───────────────────────────────────────
-    cat > /opt/vaultwarden/docker-compose.yml << 'COMPOSE'
-    version: '3.8'
-
-    services:
-
-      # ── Vaultwarden (STANDBY — do NOT start until migration) ─────────────
-      # Start with: docker compose up -d vaultwarden
-      # Stop with:  docker compose stop vaultwarden
-      vaultwarden:
-        image: vaultwarden/server:latest
-        container_name: vaultwarden
-        restart: "no"          # STANDBY: manual start only. Change to unless-stopped after migration.
-        environment:
-          ROCKET_ADDRESS: "127.0.0.1"  # localhost only until migration — then change to Tailscale IP
-          ROCKET_PORT: "8080"
-          DOMAIN: "https://vault.${var.domain_name}"
-          SIGNUPS_ALLOWED: "false"
-          WEBSOCKET_ENABLED: "true"
-          LOG_LEVEL: "warn"
-        volumes:
-          - ./data:/data
-        ports:
-          - "127.0.0.1:8080:80"    # localhost only in standby — change to TS_IP:8080:80 after migration
-
-      # ── Webhook relay ────────────────────────────────────────────────────
-      # Receives public webhooks, forwards to n8n on OCI A1 via Tailscale
-      # Keeps n8n off the public internet entirely
-      webhook-relay:
-        image: nicholaswilde/webhook-relay:latest
-        container_name: webhook-relay
-        restart: unless-stopped
-        environment:
-          RELAY_TARGET: "http://${var.n8n_tailscale_ip}:5678"  # n8n on OCI A1
-          RELAY_SECRET: ""                                       # Set a shared secret
-          PORT: "9000"
-        ports:
-          - "0.0.0.0:9000:9000"   # Public — receives inbound webhooks
-    COMPOSE
-
-    # ── Nightly sync scripts ─────────────────────────────────────────────────
-
-    # Script 1: Pull Vaultwarden data from AWS → this server (keeps standby fresh)
-    cat > /opt/vaultwarden/sync-from-aws.sh << 'SYNC'
-    #!/bin/bash
-    # Syncs Vaultwarden data from AWS vault to this standby instance
-    # Run nightly while in STANDBY mode
-    # DISABLE THIS CRON after migration to active
-    set -euo pipefail
-    LOG="/var/log/vault-sync.log"
-    echo "[$(date)] Starting vault sync from AWS" >> $LOG
-
-    # Stop vaultwarden if running (prevents partial reads)
-    docker compose -f /opt/vaultwarden/docker-compose.yml stop vaultwarden 2>/dev/null || true
-
-    # Pull latest data from AWS S3 backup bucket
-    rclone sync aws_vault:vaultwarden-backup-ACCOUNT_ID /opt/vaultwarden/data/ \
-      --log-file=$LOG --log-level INFO
-
-    echo "[$(date)] Vault sync complete" >> $LOG
-    SYNC
-    chmod +x /opt/vaultwarden/sync-from-aws.sh
-
-    # Script 2: Push all backups to OCI Object Storage (offsite copy)
-    cat > /opt/vaultwarden/backup-to-oci.sh << 'BACKUP'
-    #!/bin/bash
-    # Pushes local vault data to OCI Object Storage as an offsite backup
-    # Runs nightly regardless of standby/active mode
-    set -euo pipefail
-    DATE=$(date +%Y-%m-%d-%H%M)
-    LOG="/var/log/vault-backup-oci.log"
-    BACKUP_FILE="/tmp/vault-backup-$DATE.tar.gz"
-
-    tar -czf "$BACKUP_FILE" /opt/vaultwarden/data/ 2>/dev/null || true
-    rclone copy "$BACKUP_FILE" oci_backup:vault-backups/ \
-      --log-file=$LOG --log-level INFO
-    rm -f "$BACKUP_FILE"
-    echo "[$(date)] OCI backup complete: $DATE" >> $LOG
-    BACKUP
-    chmod +x /opt/vaultwarden/backup-to-oci.sh
-
-    # ── Cron jobs ───────────────────────────────────────────────────────────
-    (crontab -u ubuntu -l 2>/dev/null; cat << 'CRON'
-    # Sync Vaultwarden data from AWS nightly at 01:00 UTC (STANDBY MODE)
-    # Comment this out after migration to active
-    0 1 * * * /opt/vaultwarden/sync-from-aws.sh >> /var/log/vault-sync.log 2>&1
-
-    # Backup to OCI Object Storage nightly at 02:00 UTC (always runs)
-    0 2 * * * /opt/vaultwarden/backup-to-oci.sh >> /var/log/vault-backup-oci.log 2>&1
-    CRON
-    ) | crontab -u ubuntu -
-
     # ── Tailscale ───────────────────────────────────────────────────────────
     curl -fsSL https://tailscale.com/install.sh | sh
     tailscale up --authkey=${var.tailscale_auth_key} \
@@ -400,24 +289,99 @@ locals {
     systemctl enable tailscaled
     sleep 8
 
-    # Start webhook relay (always running)
-    cd /opt/vaultwarden
-    docker compose up -d webhook-relay
+    # ── Rclone (pull from AWS S3, push to OCI Object Storage) ──────────────
+    curl -fsSL https://rclone.org/install.sh | bash
+    install -d -o ubuntu -g ubuntu /home/ubuntu/.config /home/ubuntu/.config/rclone
+    # NOTE: configure rclone manually after deploy (as ubuntu): rclone config
+    #   1. "aws_vault"  — S3 remote with read access to ${var.backup_bucket_name}
+    #   2. "oci_backup" — OCI Object Storage S3-compatible endpoint
+    touch /home/ubuntu/.config/rclone/rclone.conf
+    chown ubuntu:ubuntu /home/ubuntu/.config/rclone/rclone.conf
 
-    # ── UFW ─────────────────────────────────────────────────────────────────
-    ufw default deny incoming
-    ufw default allow outgoing
-    ufw allow 22/tcp    comment "SSH"
-    ufw allow 41641/udp comment "Tailscale"
-    ufw allow 9000/tcp  comment "Webhook relay"
-    # NOTE: Port 8080 (Vaultwarden) is NOT opened publicly.
-    # After migration: open 8080 via Tailscale only (not UFW public rule)
-    ufw --force enable
+    # ── App directories + log files (cron runs as ubuntu, not root) ─────────
+    mkdir -p /opt/vaultwarden/data
+    chown -R ubuntu:ubuntu /opt/vaultwarden
+    touch /var/log/vault-sync.log /var/log/vault-backup-oci.log
+    chown ubuntu:ubuntu /var/log/vault-sync.log /var/log/vault-backup-oci.log
+
+    # ── Vaultwarden public URL = this node's MagicDNS name (HTTPS) ──────────
+    # Vaultwarden's web vault needs HTTPS; tailscale serve provides it.
+    TS_DNS=$(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')
+    echo "VW_DOMAIN=https://$${TS_DNS}" > /opt/vaultwarden/.env
+
+    # ── Docker Compose ──────────────────────────────────────────────────────
+    cat > /opt/vaultwarden/docker-compose.yml << 'COMPOSE'
+    services:
+      # STANDBY — do NOT start until migration (see header for the steps)
+      vaultwarden:
+        image: vaultwarden/server:1.32.7
+        container_name: vaultwarden
+        restart: "no"           # change to unless-stopped after promotion
+        environment:
+          # Vaultwarden listens on 0.0.0.0:80 INSIDE the container (default).
+          # Setting ROCKET_ADDRESS to a host IP made it unreachable.
+          DOMAIN: "$${VW_DOMAIN}"
+          SIGNUPS_ALLOWED: "false"
+          LOG_LEVEL: "warn"
+        volumes:
+          - ./data:/data
+        ports:
+          - "127.0.0.1:8080:80"   # host 8080 → container 80; tailscale serve proxies it
+    COMPOSE
+
+    # ── Nightly sync scripts ─────────────────────────────────────────────────
+
+    # Script 1: restore the newest AWS DB snapshot into the standby data dir.
+    # The AWS bucket holds dated files (db-YYYY-MM-DD.sqlite3), not a data
+    # directory, so copy the newest one to db.sqlite3 — a blind `rclone sync`
+    # would have deleted everything else in data/.
+    cat > /opt/vaultwarden/sync-from-aws.sh << 'SYNC'
+    #!/bin/bash
+    set -euo pipefail
+    BUCKET="${var.backup_bucket_name}"
+    echo "[$(date)] Starting vault sync from s3://$BUCKET"
+
+    # Stop vaultwarden if running (prevents writing while we replace the DB)
+    docker compose -f /opt/vaultwarden/docker-compose.yml stop vaultwarden 2>/dev/null || true
+
+    LATEST=$(rclone lsf "aws_vault:$BUCKET" --include 'db-*.sqlite3' | sort | tail -n 1)
+    if [ -z "$LATEST" ]; then
+      echo "[$(date)] No db-*.sqlite3 snapshot found — nothing to do"
+      exit 1
+    fi
+    rclone copyto "aws_vault:$BUCKET/$LATEST" /opt/vaultwarden/data/db.sqlite3
+    echo "[$(date)] Restored $LATEST"
+    SYNC
+    chmod +x /opt/vaultwarden/sync-from-aws.sh
+
+    # Script 2: push a tarball of the data dir to OCI Object Storage.
+    # Errors are no longer swallowed (a failed tar used to upload anyway).
+    cat > /opt/vaultwarden/backup-to-oci.sh << 'BACKUP'
+    #!/bin/bash
+    set -euo pipefail
+    DATE=$(date +%Y-%m-%d-%H%M)
+    BACKUP_FILE="/tmp/vault-backup-$DATE.tar.gz"
+    trap 'rm -f "$BACKUP_FILE"' EXIT
+
+    tar -czf "$BACKUP_FILE" -C /opt/vaultwarden data
+    rclone copy "$BACKUP_FILE" oci_backup:vault-backups/
+    echo "[$(date)] OCI backup complete: $DATE"
+    BACKUP
+    chmod +x /opt/vaultwarden/backup-to-oci.sh
+
+    # ── Cron jobs (as ubuntu; log files were pre-created and chowned above) ─
+    (crontab -u ubuntu -l 2>/dev/null || true; cat << 'CRON'
+    # Restore newest AWS snapshot nightly at 01:00 UTC (STANDBY MODE only)
+    0 1 * * * /opt/vaultwarden/sync-from-aws.sh >> /var/log/vault-sync.log 2>&1
+
+    # Backup to OCI Object Storage nightly at 02:00 UTC (always runs)
+    0 2 * * * /opt/vaultwarden/backup-to-oci.sh >> /var/log/vault-backup-oci.log 2>&1
+    CRON
+    ) | crontab -u ubuntu -
 
     systemctl enable fail2ban && systemctl start fail2ban
 
     echo "Micro B bootstrap complete."
-    echo "Role: Vaultwarden STANDBY + Webhook relay + Rclone backup aggregator"
-    echo "Next step: run 'rclone config' to set up aws_vault and oci_backup remotes"
+    echo "Next step: as ubuntu, run 'rclone config' to set up aws_vault and oci_backup"
   EOF
 }

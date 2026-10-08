@@ -139,12 +139,17 @@ resource "oci_network_load_balancer_backend_set" "wg" {
   policy                   = "FIVE_TUPLE"
   is_preserve_source       = false
 
+  # WireGuard silently drops any packet that is not a valid handshake, so a
+  # UDP "ping"/"pong" probe can never succeed. Probe Caddy's /health on the
+  # same host instead: it proves the instance is up and serving.
   health_checker {
-    protocol = "UDP"
-    port     = 51820
-    # UDP requires hex data to send and expect back
-    request_data  = "70696e67" # Hex for "ping"
-    response_data = "706f6e67" # Hex for "pong" (or whatever WG replies with)
+    protocol           = "HTTP"
+    port               = 80
+    url_path           = "/health"
+    return_code        = 200
+    interval_in_millis = 30000
+    timeout_in_millis  = 3000
+    retries            = 3
   }
 }
 

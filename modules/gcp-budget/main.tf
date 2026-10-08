@@ -40,6 +40,9 @@ resource "google_billing_budget" "monthly" {
     credit_types_treatment = "EXCLUDE_ALL_CREDITS"
   }
 
+  # Must be in the billing account's own currency (this account bills in
+  # INR), so this is ₹1, not $1 — stricter than the other clouds, which is
+  # fine for a "should cost nothing" budget. var.threshold_usd is unused.
   amount {
     specified_amount {
       currency_code = "INR"

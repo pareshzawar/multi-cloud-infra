@@ -8,7 +8,7 @@ variable "public_subnet_cidr" {
 }
 variable "admin_allowed_cidrs" {
   type    = list(string)
-  default = ["0.0.0.0/0"]
+  default = [] # no SSH from the internet unless explicitly passed
 }
 variable "tags" {
   type    = map(string)

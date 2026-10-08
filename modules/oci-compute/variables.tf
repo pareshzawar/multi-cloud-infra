@@ -6,12 +6,6 @@ variable "ssh_public_key" { type = string }
 variable "domain_name" { type = string }
 variable "n8n_subdomain" { type = string }
 variable "wg_subdomain" { type = string }
-variable "azure_tenant_id" { type = string }
-variable "n8n_oidc_client_id" { type = string }
-variable "n8n_oidc_secret" {
-  type      = string
-  sensitive = true
-}
 variable "tailscale_auth_key" {
   type      = string
   sensitive = true

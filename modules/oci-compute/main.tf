@@ -4,11 +4,6 @@
 # cloud-init: Docker · Caddy · WireGuard · n8n · Motibot · Ghost
 ###############################################################################
 
-data "oci_identity_availability_domains" "ads" {
-  compartment_id = var.compartment_id
-
-}
-
 # Latest OCI Ubuntu 22.04 ARM image
 data "oci_core_images" "ubuntu_arm" {
   compartment_id           = var.compartment_id
@@ -49,10 +44,15 @@ resource "oci_core_instance" "ampere_a1" {
     user_data           = base64encode(local.cloud_init)
   }
 
-  # Prevent accidental destroy of the always-free compute
+  # Prevent accidental destroy of the always-free compute.
+  # user_data only runs on first boot and changing it forces a REPLACEMENT,
+  # which prevent_destroy turns into a plan error — so ignore later edits.
   lifecycle {
     prevent_destroy = true
-    ignore_changes  = [source_details[0].source_id] # Don't replace on image update
+    ignore_changes = [
+      source_details[0].source_id, # don't replace on image update
+      metadata["user_data"],       # cloud-init edits apply to new instances only
+    ]
   }
 
   freeform_tags = var.tags
@@ -63,9 +63,6 @@ locals {
     domain_name        = var.domain_name
     n8n_subdomain      = var.n8n_subdomain
     wg_subdomain       = var.wg_subdomain
-    azure_tenant_id    = var.azure_tenant_id
-    n8n_oidc_client_id = var.n8n_oidc_client_id
-    n8n_oidc_secret    = var.n8n_oidc_secret
     tailscale_auth_key = var.tailscale_auth_key
     wireguard_host_ip  = var.wireguard_host_ip
   })

@@ -110,9 +110,23 @@ module "oci_security" {
   vcn_id              = module.oci_networking.vcn_id
   public_subnet_id    = module.oci_networking.public_subnet_id
   private_subnet_id   = module.oci_networking.private_subnet_id
+  public_subnet_cidr  = "10.0.1.0/24" # keep in sync with module.oci_networking
   admin_allowed_cidrs = var.admin_allowed_cidrs
 
   tags = local.common_tags
+}
+
+# The security lists moved from oci-security to oci-networking (so the subnets
+# can attach them). These blocks tell Terraform it is the same object, so an
+# existing deployment updates in place instead of destroy + recreate.
+moved {
+  from = module.oci_security.oci_core_security_list.public
+  to   = module.oci_networking.oci_core_security_list.public
+}
+
+moved {
+  from = module.oci_security.oci_core_security_list.private
+  to   = module.oci_networking.oci_core_security_list.private
 }
 
 ###############################################################################
@@ -154,11 +168,10 @@ module "oci_compute" {
   domain_name        = var.domain_name
   n8n_subdomain      = "n8n.${var.domain_name}"
   wg_subdomain       = "wg.${var.domain_name}"
-  azure_tenant_id    = var.azure_tenant_id
-  n8n_oidc_client_id = module.azure_sso.n8n_client_id
-  n8n_oidc_secret    = module.azure_sso.n8n_client_secret
   tailscale_auth_key = var.tailscale_auth_key
-  wireguard_host_ip  = module.oci_lb.public_ip
+  # WireGuard is UDP, which only the Network Load Balancer listens for —
+  # the flexible LB IP (module.oci_lb.public_ip) has no UDP listener.
+  wireguard_host_ip = module.oci_lb.wg_nlb_public_ip
 
   tags = local.common_tags
 }
@@ -191,9 +204,6 @@ module "oci_micro2" {
   ssh_public_key      = var.ssh_public_key
 
   tailscale_auth_key = var.tailscale_auth_key
-  domain_name        = var.domain_name
-  alert_email        = var.alert_email
-  a1_private_ip      = module.oci_compute.private_ip
 
   tags = local.common_tags
 }
@@ -206,18 +216,19 @@ module "oci2_compute" {
   source    = "../../modules/oci-compute2"
   providers = { oci = oci.tenancy2 }
 
-  compartment_id      = var.oci2_tenancy_ocid
+  compartment_id      = var.oci2_compartment_id # was the tenancy OCID; this var was declared but unused
   availability_domain = var.oci2_availability_domain
   ssh_public_key      = var.ssh_public_key
   tailscale_auth_key  = var.tailscale_auth_key
+  backup_bucket_name  = "vaultwarden-backup-${var.aws_account_id}" # same bucket aws_vault writes to
 
   tags = local.common_tags
 }
 
 ###############################################################################
 # Module: AWS Vault
-# FIX 9: Removed private_subnet_cidr — NAT Gateway removed in feat/remove-nat-gateway
-#         EC2 now lives in public subnet directly
+# NAT Gateway removed: the instance stays in its original subnet (172.16.1.0/24),
+# whose route table now points at the IGW; an Elastic IP gives it egress.
 ###############################################################################
 
 module "aws_vault" {
@@ -225,7 +236,6 @@ module "aws_vault" {
 
   aws_region         = var.aws_region
   vpc_cidr           = "172.16.0.0/16"
-  public_subnet_cidr = "172.16.1.0/24"
   availability_zone  = var.aws_availability_zone
   instance_type      = "t3.micro"
   tailscale_auth_key = var.tailscale_auth_key
@@ -242,7 +252,7 @@ module "aws_vault" {
 module "aws_budget" {
   source = "../../modules/aws-budget"
 
-  account_id    = var.aws_account_id
+  account_id    = var.aws_account_id # used to scope the SNS topic policy
   alert_email   = var.alert_email
   threshold_usd = 1.00
 }
@@ -260,10 +270,12 @@ module "gcp_gateway" {
   ssh_public_key        = var.ssh_public_key
   uptime_kuma_subdomain = var.uptime_kuma_subdomain
 
-  vpc_cidr           = "192.168.1.0/24"
-  tailscale_auth_key = var.tailscale_auth_key
-  oci_tailscale_ip   = var.oci_tailscale_ip
-  domain_name        = var.domain_name
+  vpc_cidr = "192.168.1.0/24"
+  # Only Cloudflare may reach ports 80/443, so the proxy cannot be bypassed.
+  cloudflare_ipv4_cidrs = data.cloudflare_ip_ranges.cloudflare.ipv4_cidr_blocks
+  tailscale_auth_key    = var.tailscale_auth_key
+  oci_tailscale_ip      = var.oci_tailscale_ip
+  domain_name           = var.domain_name
 
   tags = local.common_tags
 }
@@ -289,6 +301,9 @@ module "azure_sso" {
 
   tenant_id   = var.azure_tenant_id
   domain_name = var.domain_name
+  # Off by default: a personal Entra tenant usually lacks the permission to
+  # create app registrations. See MANUAL_SETUP.md.
+  create_apps = var.azure_create_apps
 
   n8n_redirect_uri         = "https://n8n.${var.domain_name}/rest/oauth2-credential/callback"
   uptime_kuma_redirect_uri = "https://status.${var.domain_name}/auth/callback"
@@ -336,23 +351,21 @@ resource "cloudflare_record" "status" {
   allow_overwrite = true
 }
 
-resource "cloudflare_record" "vault" {
+# No public "vault" record: Vaultwarden is reached via its Tailscale MagicDNS
+# name (https://aws-vault.<tailnet>.ts.net). Publishing a 100.x CGNAT address
+# in public DNS only leaked the tailnet IP and could never get a valid cert.
+
+resource "cloudflare_record" "wg" {
   zone_id         = var.cloudflare_zone_id
-  name            = "vault"
-  content         = module.aws_vault.tailscale_ip
+  name            = "wg"
+  content         = module.oci_lb.public_ip # admin UI (HTTPS via Caddy). VPN clients dial the NLB IP directly (WG_HOST).
   type            = "A"
   proxied         = false
   allow_overwrite = true
 }
 
-resource "cloudflare_record" "wg" {
-  zone_id         = var.cloudflare_zone_id
-  name            = "wg"
-  content         = module.oci_lb.public_ip
-  type            = "A"
-  proxied         = false
-  allow_overwrite = true
-}
+# Cloudflare's published edge ranges — used to lock the GCP gateway firewall.
+data "cloudflare_ip_ranges" "cloudflare" {}
 
 resource "cloudflare_zone_settings_override" "ssl" {
   zone_id = var.cloudflare_zone_id

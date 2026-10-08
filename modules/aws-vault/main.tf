@@ -10,10 +10,12 @@
 #   · NAT Gateway + its EIP are removed (the ~$44/month saving).
 #   · S3 SSE changed aws:kms -> AES256 (free).
 #
-# CRITICAL — every value below matches live state to avoid replacement:
-#   subnet_id, associate_public_ip_address=false, key_name, SG name/description.
-#   Do NOT "tidy" the subnet name, SG description, or IGW resource name —
-#   each is ForceNew and would destroy the vault.
+# CRITICAL — these are ForceNew and would destroy the vault if changed:
+#   subnet_id, associate_public_ip_address, key_name, SG name/description.
+#   associate_public_ip_address is set to false (the EIP below provides the
+#   public IP) AND listed in ignore_changes, so whichever value the live
+#   instance has, Terraform never plans a replacement over it.
+#   Do NOT "tidy" the subnet name, SG description, or IGW resource name.
 ###############################################################################
 
 data "aws_ami" "ubuntu_22" {
@@ -57,16 +59,16 @@ resource "aws_internet_gateway" "igw" {
 
 resource "aws_subnet" "private" {
   vpc_id            = aws_vpc.vault.id
-  cidr_block        = "172.16.1.0/24" # subnet-0ed3906bbcff7788d — DO NOT CHANGE (instance lives here)
-  availability_zone = "ap-south-1a"
+  cidr_block        = "172.16.1.0/24"       # DO NOT CHANGE (instance lives here)
+  availability_zone = var.availability_zone # default ap-south-1a = live value
 
   tags = merge(var.tags, { Name = "vault-private-subnet" })
 }
 
 resource "aws_subnet" "public" {
   vpc_id            = aws_vpc.vault.id
-  cidr_block        = "172.16.2.0/24" # subnet-01a4ad662701b0060 — kept; empty after NAT removal
-  availability_zone = "ap-south-1a"
+  cidr_block        = "172.16.2.0/24" # kept; empty after NAT removal
+  availability_zone = var.availability_zone
 
   tags = merge(var.tags, { Name = "vault-public-subnet" })
 }
@@ -256,6 +258,13 @@ resource "aws_iam_role_policy" "vault_s3" {
   })
 }
 
+# Lets you open a shell with AWS Systems Manager (Session Manager) without SSH.
+# The post-deploy checklist relies on this; it was missing before.
+resource "aws_iam_role_policy_attachment" "vault_ssm" {
+  role       = aws_iam_role.vault_ec2.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
 resource "aws_iam_instance_profile" "vault_ec2" {
   name = "vault-ec2-profile"
   role = aws_iam_role.vault_ec2.name
@@ -274,7 +283,7 @@ resource "aws_instance" "vault" {
   vpc_security_group_ids      = [aws_security_group.vault.id]
   iam_instance_profile        = aws_iam_instance_profile.vault_ec2.name
   key_name                    = aws_key_pair.vault.key_name
-  associate_public_ip_address = true
+  associate_public_ip_address = false # public IP comes from aws_eip.vault
 
   root_block_device {
     volume_type           = "gp3"
@@ -294,7 +303,11 @@ resource "aws_instance" "vault" {
 
   lifecycle {
     prevent_destroy = true
-    ignore_changes  = [ami, user_data]
+    ignore_changes = [
+      ami,
+      user_data,                   # first-boot only; edits apply to new instances
+      associate_public_ip_address, # ForceNew — never replace the live vault over it
+    ]
   }
 
   tags = merge(var.tags, { Name = "vault-vaultwarden" })
