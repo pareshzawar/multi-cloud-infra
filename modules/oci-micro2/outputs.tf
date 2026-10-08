@@ -18,11 +18,11 @@ output "display_name" {
 }
 
 output "uptime_kuma_internal_url" {
-  description = "Uptime Kuma URL via Tailscale (access after connecting VPN/Tailscale)"
-  value       = "http://${oci_core_instance.micro2.private_ip}:3001  (via Tailscale only)"
+  description = "Uptime Kuma, published to the tailnet by `tailscale serve` (tailnet members only)"
+  value       = "https://oci-micro2-ops.<your-tailnet>.ts.net/"
 }
 
 output "portainer_internal_url" {
-  description = "Portainer URL via Tailscale"
-  value       = "http://${oci_core_instance.micro2.private_ip}:9000  (via Tailscale only)"
+  description = "Portainer, published to the tailnet by `tailscale serve` (tailnet members only)"
+  value       = "https://oci-micro2-ops.<your-tailnet>.ts.net:8443/"
 }

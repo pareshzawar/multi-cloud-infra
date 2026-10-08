@@ -16,24 +16,24 @@ output "oci_micro2_private_ip" {
 }
 
 output "uptime_kuma_url" {
-  description = "Uptime Kuma — now on OCI Micro #2, access via Tailscale/WireGuard"
+  description = "Uptime Kuma on OCI Micro #2 — tailnet only"
   value       = module.oci_micro2.uptime_kuma_internal_url
 }
 
 output "portainer_url" {
-  description = "Portainer CE — Docker GUI, access via Tailscale/WireGuard"
+  description = "Portainer CE on OCI Micro #2 — tailnet only"
   value       = module.oci_micro2.portainer_internal_url
 }
 
 # ── OCI ──────────────────────────────────────────────────────────────────────
 
 output "oci_lb_public_ip" {
-  description = "OCI Load Balancer public IP — point wg.yourdomain.com here"
+  description = "OCI flexible LB public IP — wg.yourdomain.com (admin UI) points here"
   value       = module.oci_lb.public_ip
 }
 
 output "oci_wg_nlb_ip" {
-  description = "OCI Network Load Balancer IP for WireGuard UDP"
+  description = "OCI Network Load Balancer IP — WireGuard clients connect here (UDP 51820)"
   value       = module.oci_lb.wg_nlb_public_ip
 }
 
@@ -60,7 +60,7 @@ output "aws_vault_instance_id" {
 }
 
 output "aws_vault_private_ip" {
-  description = "AWS private IP (access via Tailscale or SSM only)"
+  description = "AWS private IP (access via Tailscale or SSM Session Manager)"
   value       = module.aws_vault.private_ip
 }
 
@@ -130,9 +130,13 @@ output "dns_records_summary" {
     "www.yourdomain.com (A, proxied)"    = module.gcp_gateway.public_ip
     "n8n.yourdomain.com (A, proxied)"    = module.gcp_gateway.public_ip
     "status.yourdomain.com (A, proxied)" = module.gcp_gateway.public_ip
-    "wg.yourdomain.com (A, DNS only)"    = module.oci_lb.wg_nlb_public_ip
-    "vault.yourdomain.com (A, DNS only)" = "run tailscale ip -4 on AWS after deploy"
+    "wg.yourdomain.com (A, DNS only)"    = "${module.oci_lb.public_ip} (admin UI via LB; VPN clients use the NLB IP ${module.oci_lb.wg_nlb_public_ip})"
   }
+}
+
+output "aws_vault_url" {
+  description = "Vaultwarden — tailnet only (HTTPS via tailscale serve)"
+  value       = module.aws_vault.tailscale_url
 }
 
 # ── Post-Deploy Checklist ─────────────────────────────────────────────────────
@@ -142,66 +146,57 @@ output "next_steps" {
   value       = <<-STEPS
     ── POST-DEPLOY CHECKLIST ──────────────────────────────────────────
 
-    1. GET TAILSCALE IPs (run on each server after deploy):
-       OCI A1:     ssh ubuntu@<a1_private_ip>  → tailscale ip -4
-       OCI Micro2: ssh ubuntu@<micro2_private_ip> → tailscale ip -4
-       AWS Vault:  connect via AWS SSM → tailscale ip -4
-       GCP:        gcloud compute ssh gateway-e2-micro → tailscale ip -4
-       → Note all IPs, add oci_tailscale_ip to tfvars, run terraform apply again
+    0. TAILSCALE: in the admin console enable MagicDNS + HTTPS certificates.
+       All admin UIs below are published with `tailscale serve` and are
+       reachable ONLY from devices on your tailnet.
 
-    2. PORTAINER — get initial password:
-       ssh ubuntu@<micro2_private_ip>
-       cat /opt/ops/portainer/admin_password
-       Open http://<micro2_tailscale_ip>:9000 (via Tailscale)
-       Log in → Settings → Environments → Add Environment → Agent
-       Enter OCI A1 private IP:9001 to manage A1 containers from Portainer
+    1. TAILSCALE IPs / names (optional — MagicDNS names work directly):
+       OCI A1:     ssh ubuntu@oci-a1-apps        → tailscale ip -4
+       AWS Vault:  AWS Console → Systems Manager → Session Manager
+       GCP:        gcloud compute ssh gateway-e2-micro --tunnel-through-iap
+       → add the A1 Tailscale IP as oci_tailscale_ip in tfvars
 
-    3. UPTIME KUMA — configure monitors (via Tailscale):
-       Open http://<micro2_tailscale_ip>:3001
-       Add monitors (uses A1 private IP for internal services — no hop):
-         OCI A1 — n8n:       http://<a1_private_ip>:5678
-         OCI A1 — Ghost:     http://<a1_private_ip>:2368
-         OCI A1 — WireGuard: http://<a1_private_ip>:51821
-         AWS — Vaultwarden:  http://<aws_tailscale_ip>:8080
-         Public — Blog:      https://yourdomain.com
-         Public — n8n:       https://n8n.yourdomain.com
-         SSL cert — Blog:    (certificate expiry monitor)
+    2. PORTAINER — https://oci-micro2-ops.<tailnet>.ts.net:8443
+       Initial password: ssh ubuntu@oci-micro2-ops
+                         sudo cat /opt/ops/portainer/admin_password
+       Environments → Add → Agent → <a1_private_ip>:9001 to manage A1
 
-    4. VAULTWARDEN — create your account (FIRST TIME ONLY):
-       Connect Tailscale on laptop
-       Open http://<aws_tailscale_ip>:8080
-       Create account → set SIGNUPS_ALLOWED=false
+    3. UPTIME KUMA — https://oci-micro2-ops.<tailnet>.ts.net
+       Monitor the public endpoints (A1 apps listen on localhost only):
+         Public — Blog:  https://yourdomain.com
+         Public — n8n:   https://n8n.yourdomain.com
+         Vault:          https://aws-vault.<tailnet>.ts.net
+         SSL cert expiry monitors for the public hostnames
 
-    5. CADDY — set WireGuard admin password hash:
-       ssh into OCI A1
-       docker exec caddy caddy hash-password
-       Update /etc/caddy/Caddyfile, reload: sudo systemctl reload caddy
+    4. VAULTWARDEN — https://aws-vault.<tailnet>.ts.net (FIRST TIME ONLY)
+       Create your account, then on the instance:
+         edit /opt/vaultwarden/docker-compose.yml → SIGNUPS_ALLOWED: "false"
+         cd /opt/vaultwarden && sudo docker compose up -d
 
-    6. WIREGUARD — add your devices:
-       Open https://wg.yourdomain.com (or http://<a1_tailscale_ip>:51821)
-       Click + Add Client → scan QR with WireGuard app
+    5. WIREGUARD — https://wg.yourdomain.com  (Caddy basic auth)
+       User: admin   Password: sudo cat /root/wg-admin-password  (on A1)
+       + Add Client → scan the QR code with the WireGuard app
 
-    7. NGINX PROXY MANAGER (GCP — leaner, NPM only):
-       Open http://<gcp_public_ip>:81 via Tailscale
+    6. NGINX PROXY MANAGER — https://gcp-gateway.<tailnet>.ts.net:8443
        Default login: admin@example.com / changeme → CHANGE IMMEDIATELY
-       Add proxy hosts → forward to OCI A1 via Tailscale IP
+       Add proxy hosts → forward to OCI A1 via its Tailscale IP
 
-    8. AZURE SSO — grant admin consent:
+    7. AZURE SSO (only if azure_sso_create_apps = true, else MANUAL_SETUP.md):
        portal.azure.com → Entra ID → Enterprise Applications
        For each app: Permissions → Grant admin consent
 
-    9. VERIFY SECURITY:
-       curl http://<aws_public_ip>:8080  → Must timeout (no public vault port)
-       curl https://yourdomain.com       → Ghost blog loads
-       curl -I yourdomain.com | grep CF-Ray → Confirms Cloudflare proxy
-       curl http://<micro2_public_ip>:3001 → Must timeout (Tailscale only)
+    8. VERIFY SECURITY:
+       curl -m5 http://<aws_eip>:8080        → must time out
+       curl -m5 http://<gcp_public_ip>       → must time out (Cloudflare-only)
+       curl -I https://yourdomain.com | grep -i cf-ray → proxied via Cloudflare
 
     ── SERVER SUMMARY ─────────────────────────────────────────────────
     OCI Ampere A1   — WireGuard + n8n + Motibot + Ghost + Caddy
-    OCI E2.1.Micro  — Uptime Kuma + Portainer + Watchtower  ← NEW
-    AWS t2/t3.micro — Vaultwarden (Tailscale-only, zero public port)
-    GCP e2-micro    — Nginx Proxy Manager only  (leaner after move)
-    Azure Entra ID  — OIDC SSO (serverless, no compute)
+    OCI E2.1.Micro  — Uptime Kuma + Portainer + Watchtower
+    OCI tenancy 2   — overflow worker + Vaultwarden standby
+    AWS t3.micro    — Vaultwarden (tailnet-only, zero public ports)
+    GCP e2-micro    — Nginx Proxy Manager (Cloudflare-only 80/443)
+    Azure Entra ID  — optional OIDC app registrations
     ───────────────────────────────────────────────────────────────────
   STEPS
 }

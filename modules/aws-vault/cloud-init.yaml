@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ── System update ──────────────────────────────────────────────
 apt-get update && apt-get upgrade -y
-apt-get install -y curl wget git ufw fail2ban unattended-upgrades sqlite3 awscli
+apt-get install -y curl wget git ufw fail2ban unattended-upgrades sqlite3 awscli python3
 
 # ── Swapfile (critical for 1 GB RAM) ───────────────────────────
 fallocate -l 2G /swapfile
@@ -24,41 +24,57 @@ curl -fsSL https://tailscale.com/install.sh | sh
 tailscale up --authkey=${tailscale_auth_key} --hostname=${tailscale_hostname} --accept-routes
 systemctl enable tailscaled
 
-# ── Wait for Tailscale IP ──────────────────────────────────────
+# ── Wait for Tailscale, read this node's MagicDNS name ─────────
 sleep 10
-TS_IP=$(tailscale ip -4)
-echo "Tailscale IP: $TS_IP"
+TS_DNS=$(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')
+echo "Tailscale name: $TS_DNS"
 
 # ── Vaultwarden via Docker ─────────────────────────────────────
+# Vaultwarden listens on 0.0.0.0:80 INSIDE the container (its default).
+# Previously ROCKET_ADDRESS was set to the host's Tailscale IP — an address
+# the container does not own — and the port map pointed at 80 while Rocket
+# listened on 8080, so the service was unreachable.
+# It is published on host 127.0.0.1:8080 and exposed to the tailnet over
+# HTTPS by `tailscale serve`; the web vault refuses to work over plain HTTP.
 mkdir -p /opt/vaultwarden/data
 chown -R ubuntu:ubuntu /opt/vaultwarden
 
 cat > /opt/vaultwarden/docker-compose.yml << COMPOSE
-version: '3.8'
 services:
   vaultwarden:
-    image: vaultwarden/server:latest
+    image: vaultwarden/server:1.32.7
     container_name: vaultwarden
     restart: unless-stopped
     environment:
-      ROCKET_ADDRESS: "$${TS_IP}"
-      ROCKET_PORT: "8080"
-      DOMAIN: "http://$${TS_IP}:8080"
-      SIGNUPS_ALLOWED: "false"
-      WEBSOCKET_ENABLED: "true"
+      DOMAIN: "https://$${TS_DNS}"
+      # true only until you create your account (tailnet-only, so the window
+      # is small). Then set "false" and: docker compose up -d
+      SIGNUPS_ALLOWED: "true"
       LOG_LEVEL: "warn"
     volumes:
       - /opt/vaultwarden/data:/data
     ports:
-      - "$${TS_IP}:8080:80"
+      - "127.0.0.1:8080:80"
 COMPOSE
 
 cd /opt/vaultwarden && docker compose up -d
 
+# Tailnet-only HTTPS → https://<hostname>.<tailnet>.ts.net
+# (needs MagicDNS + HTTPS enabled in the Tailscale admin console)
+tailscale serve --bg http://127.0.0.1:8080 || echo "WARN: enable HTTPS in Tailscale, then: tailscale serve --bg http://127.0.0.1:8080"
+
+# ── UFW: only Tailscale inbound (SSH arrives over the tailnet) ─
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow 41641/udp
+ufw allow in on tailscale0
+ufw --force enable
+
 # ── S3 backup cron (region: ${aws_region}, bucket: ${backup_bucket_name}) ──
+# sqlite3 ".backup" takes a consistent snapshot of the live database.
 cat > /opt/vaultwarden/backup.sh << 'BACKUP'
 #!/bin/bash
-set -e
+set -euo pipefail
 sqlite3 /opt/vaultwarden/data/db.sqlite3 ".backup '/tmp/vault-backup.sqlite3'"
 aws s3 cp /tmp/vault-backup.sqlite3 s3://${backup_bucket_name}/db-$(date +%F).sqlite3 --region ${aws_region}
 rm -f /tmp/vault-backup.sqlite3

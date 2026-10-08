@@ -33,22 +33,6 @@ variable "tailscale_auth_key" {
   sensitive   = true
 }
 
-variable "domain_name" {
-  description = "Root domain for Watchtower email sender address"
-  type        = string
-}
-
-variable "alert_email" {
-  description = "Email for Watchtower update notifications"
-  type        = string
-}
-
-variable "a1_private_ip" {
-  description = "Ampere A1 private IP — used to configure Portainer agent endpoint"
-  type        = string
-  default     = "" # Set after A1 deploy; Portainer endpoint added manually first time
-}
-
 variable "tags" {
   description = "Freeform tags"
   type        = map(string)

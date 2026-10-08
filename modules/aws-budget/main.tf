@@ -1,13 +1,32 @@
 ###############################################################################
 # modules/aws-budget/main.tf
-# AWS Billing Budget + CloudWatch alarm
-# Alerts at $1 actual spend AND $1 forecast
+# AWS Billing Budgets → email + SNS
+# Alerts at 50% / 100% of $1 actual spend, and at $1 forecast
 ###############################################################################
 
 # SNS Topic for budget notifications
 resource "aws_sns_topic" "budget_alert" {
   name = "billing-budget-alert"
   tags = {}
+}
+
+# Without this policy AWS Budgets and EventBridge are not allowed to publish to
+# the topic, so their SNS notifications were silently dropped. Scoped to this
+# account via aws:SourceAccount.
+resource "aws_sns_topic_policy" "budget_alert" {
+  arn = aws_sns_topic.budget_alert.arn
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "AllowBudgetsAndEventBridgePublish"
+      Effect    = "Allow"
+      Principal = { Service = ["budgets.amazonaws.com", "events.amazonaws.com"] }
+      Action    = "SNS:Publish"
+      Resource  = aws_sns_topic.budget_alert.arn
+      Condition = { StringEquals = { "aws:SourceAccount" = var.account_id } }
+    }]
+  })
 }
 
 resource "aws_sns_topic_subscription" "email" {
@@ -65,34 +84,13 @@ resource "aws_budgets_budget" "monthly_forecast" {
   }
 }
 
-# ── CloudWatch: Free tier usage alert ────────────────────────────────────────
-# Alert when EC2 hours approach the 750-hour/month free tier limit
-
-resource "aws_cloudwatch_metric_alarm" "ec2_hours" {
-  alarm_name          = "ec2-free-tier-hours-warning"
-  comparison_operator = "GreaterThanOrEqualToThreshold"
-  evaluation_periods  = 1
-  metric_name         = "EstimatedCharges"
-  namespace           = "AWS/Billing"
-  period              = 86400 # Daily
-  statistic           = "Maximum"
-  threshold           = var.threshold_usd
-  alarm_description   = "AWS billing charges exceed $${var.threshold_usd}"
-  treat_missing_data  = "notBreaching"
-
-  dimensions = {
-    Currency = "USD"
-  }
-
-  alarm_actions = [aws_sns_topic.budget_alert.arn]
-  ok_actions    = [aws_sns_topic.budget_alert.arn]
-
-  tags = {}
-}
+# (A CloudWatch "EstimatedCharges" alarm used to live here. AWS publishes that
+#  metric ONLY in us-east-1, so an alarm in ap-south-1 could never fire. The
+#  two budgets above already cover actual and forecast spend.)
 
 # ── Free Tier Expiry Reminder ─────────────────────────────────────────────────
-# CloudWatch Event to remind 60 days before 12-month free tier expires
-# NOTE: Set your account creation date in var.free_tier_expiry_date
+# Monthly EventBridge reminder → SNS (a fixed monthly nudge, not tied to the
+# account's actual free-tier end date)
 
 resource "aws_cloudwatch_event_rule" "free_tier_reminder" {
   name                = "free-tier-expiry-reminder"

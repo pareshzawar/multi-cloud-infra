@@ -35,7 +35,9 @@ resource "google_compute_subnetwork" "gateway" {
 
 # ── Firewall Rules ────────────────────────────────────────────────────────────
 
-# Allow HTTP/HTTPS from internet (Cloudflare → GCP)
+# Allow HTTP/HTTPS from Cloudflare's edge only. DNS records are proxied, so
+# legitimate traffic always arrives from Cloudflare; allowing 0.0.0.0/0 let
+# anyone bypass Cloudflare (WAF/DDoS) by hitting the static IP directly.
 resource "google_compute_firewall" "allow_http_https" {
   name    = "gateway-allow-http-https"
   network = google_compute_network.gateway.name
@@ -46,9 +48,9 @@ resource "google_compute_firewall" "allow_http_https" {
     ports    = ["80", "443"]
   }
 
-  source_ranges = ["0.0.0.0/0"]
+  source_ranges = var.cloudflare_ipv4_cidrs
   target_tags   = ["gateway"]
-  description   = "Allow HTTP/HTTPS from internet"
+  description   = "Allow HTTP/HTTPS from Cloudflare only"
 }
 
 # Allow Tailscale UDP
@@ -84,22 +86,9 @@ resource "google_compute_firewall" "allow_ssh_iap" {
   description   = "SSH via Google IAP only"
 }
 
-# Allow Nginx Proxy Manager admin UI — from Tailscale range only
-resource "google_compute_firewall" "allow_npm_admin" {
-  name    = "gateway-allow-npm-admin"
-  network = google_compute_network.gateway.name
-  project = var.project_id
-
-  allow {
-    protocol = "tcp"
-    ports    = ["81"] # Nginx Proxy Manager UI
-  }
-
-  # Tailscale CGNAT range — only accessible via VPN
-  source_ranges = ["100.64.0.0/10"]
-  target_tags   = ["gateway"]
-  description   = "NPM admin — Tailscale only"
-}
+# (No firewall rule for the NPM admin UI: tailnet traffic arrives inside the
+#  encrypted WireGuard tunnel on UDP 41641, so a VPC rule for 100.64.0.0/10
+#  never matched anything. The UI is published with `tailscale serve`.)
 
 # Note: Uptime Kuma firewall rule removed — service moved to OCI Micro #2
 
@@ -142,13 +131,17 @@ resource "google_compute_instance" "gateway" {
     user-data = local.gateway_cloud_init
   }
 
+  # Least privilege: the default compute SA with "cloud-platform" scope is
+  # effectively project Editor. The gateway only needs to ship logs/metrics.
+  # Changing scopes needs a stop/start, hence allow_stopping_for_update.
   service_account {
-    scopes = ["cloud-platform"]
+    scopes = ["logging-write", "monitoring-write"]
   }
+  allow_stopping_for_update = true
 
   lifecycle {
     prevent_destroy = true
-    ignore_changes = [metadata["user-data"], boot_disk[0].initialize_params[0].image]
+    ignore_changes  = [metadata["user-data"], boot_disk[0].initialize_params[0].image]
   }
 }
 
@@ -185,12 +178,10 @@ locals {
 
     # ── App stack ─────────────────────────────────────────────────────────
     # Uptime Kuma moved to OCI Micro #2 (same VCN as A1, lower latency)
-    mkdir -p /opt/gateway/{nginx/data,nginx/letsencrypt}
+    mkdir -p /opt/gateway/nginx/data /opt/gateway/nginx/letsencrypt
     chown -R ubuntu:ubuntu /opt/gateway
 
     cat > /opt/gateway/docker-compose.yml << 'COMPOSE'
-    version: '3.8'
-
     services:
 
       # Nginx Proxy Manager — sole service on GCP
@@ -202,7 +193,7 @@ locals {
         ports:
           - "80:80"
           - "443:443"
-          - "127.0.0.1:81:81"    # Admin UI — localhost only (access via Tailscale)
+          - "127.0.0.1:81:81"    # Admin UI — localhost; tailnet via tailscale serve
         volumes:
           - ./nginx/data:/data
           - ./nginx/letsencrypt:/etc/letsencrypt
@@ -212,6 +203,10 @@ locals {
 
     cd /opt/gateway
     docker compose up -d
+
+    # NPM admin → https://gcp-gateway.<tailnet>.ts.net:8443 (tailnet only).
+    # Not 443: NPM itself already binds 0.0.0.0:443 for public traffic.
+    tailscale serve --bg --https=8443 http://127.0.0.1:81 || echo "WARN: enable HTTPS in Tailscale, then re-run tailscale serve"
 
     # ── UFW ───────────────────────────────────────────────────────────────
     ufw default deny incoming

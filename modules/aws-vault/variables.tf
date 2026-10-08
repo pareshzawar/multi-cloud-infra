@@ -9,12 +9,6 @@ variable "vpc_cidr" {
   default     = "172.16.0.0/16"
 }
 
-variable "public_subnet_cidr" {
-  description = "CIDR block for the public subnet (EC2 now lives here, outbound via IGW)"
-  type        = string
-  default     = "172.16.1.0/24"
-}
-
 variable "availability_zone" {
   description = "AZ for the public subnet and EC2 instance"
   type        = string

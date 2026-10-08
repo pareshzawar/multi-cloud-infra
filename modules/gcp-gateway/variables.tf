@@ -17,3 +17,7 @@ variable "tags" {
   type    = map(string)
   default = {}
 }
+variable "cloudflare_ipv4_cidrs" {
+  description = "Cloudflare edge IPv4 ranges allowed to reach ports 80/443"
+  type        = list(string)
+}

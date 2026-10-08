@@ -87,10 +87,9 @@ variable "gcp_region" {
 }
 
 variable "gcp_zone" {
-  description = "GCP region — MUST be us-central1, us-east1, or us-west1 for Always Free e2-micro"
+  description = "GCP zone inside var.gcp_region (e.g. us-west1-a)"
   type        = string
   default     = "us-west1-a"
-
 }
 
 # ── Azure ─────────────────────────────────────────────────────────────────────
@@ -152,7 +151,9 @@ variable "tailscale_auth_key" {
 variable "admin_allowed_cidrs" {
   description = "CIDRs allowed to reach admin interfaces directly (your home/office IPs)"
   type        = list(string)
-  default     = ["0.0.0.0/0"] # Tighten this to your IP for production
+  # Empty = no SSH from the internet. The OCI VMs have no public IP anyway;
+  # reach them over Tailscale. Add your own /32 here only if you need it.
+  default = []
 }
 
 variable "github_org" {
@@ -189,4 +190,18 @@ variable "aws_availability_zone" {
   description = "AWS availability zone for the vault EC2 and public subnet"
   type        = string
   default     = "ap-south-1a"
+}
+
+# Referenced by provider "oci" in main.tf but was never declared, which made
+# `terraform validate` fail. Pass via TF_VAR_oci_private_key (PEM contents).
+variable "oci_private_key" {
+  description = "OCI API signing key (PEM contents) for tenancy 1"
+  type        = string
+  sensitive   = true
+}
+
+variable "azure_sso_create_apps" {
+  description = "Create the Entra ID app registrations with Terraform (needs Application.ReadWrite.All). false = create them by hand, see MANUAL_SETUP.md"
+  type        = bool
+  default     = false
 }

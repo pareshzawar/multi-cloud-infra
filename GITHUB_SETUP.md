@@ -25,8 +25,8 @@ git init
 git add .
 git commit -m "feat: initial multi-cloud Terraform stack
 
-- OCI: VCN, private subnet, NSGs, Flexible LB, Ampere A1
-- AWS: VPC, private subnet, Vaultwarden EC2, S3 backups
+- OCI: VCN, public + private subnets, NSGs, Flexible LB + Network LB, Ampere A1
+- AWS: VPC, Vaultwarden EC2 (Elastic IP, no public service ports), S3 backups
 - GCP: VPC, e2-micro gateway, Nginx Proxy Manager, Uptime Kuma
 - Azure: Entra ID OIDC SSO for n8n, Uptime Kuma, WireGuard
 - Budgets: $1 alerts on all 3 clouds
@@ -181,12 +181,12 @@ cat ~/.ssh/multi-cloud.pub   # Paste as SSH_PUBLIC_KEY secret
 
 ## Step 4 — Set up GitHub Environments
 
-The CI/CD workflow uses a `production` environment with required reviewers for `terraform apply`.
+Apply runs in a `production` environment. Give it required reviewers so a
+human approves every apply:
 
 1. Go to **Settings → Environments → New environment**
 2. Name it `production`
 3. Add **Required reviewers** → add your GitHub username
-4. This means merging to `main` shows a review gate before `apply` runs
 
 ---
 
@@ -194,10 +194,8 @@ The CI/CD workflow uses a `production` environment with required reviewers for `
 
 The workflow file is already at `.github/workflows/terraform.yml`.
 
-After pushing:
-1. Go to **Actions** tab
+1. Go to the **Actions** tab
 2. Click **I understand my workflows, go ahead and enable them**
-3. The workflow triggers on the next push or PR
 
 ---
 
@@ -207,32 +205,26 @@ Go to **Settings → Branches → Add branch protection rule**:
 
 - Branch name pattern: `main`
 - ✅ Require a pull request before merging
-- ✅ Require status checks to pass: `Terraform Plan`
+- ✅ Require status checks to pass: `Validate (no cloud access)`
 - ✅ Require linear history
-- ✅ Do not allow bypassing the above settings
-
-This means every infrastructure change goes through:
-`feature branch → PR → terraform plan (automated) → review → merge → terraform apply`
 
 ---
 
-## Step 7 — First Deploy
+## Step 7 — Deploying
+
+Pull requests and merges **never** touch cloud resources. They only run
+`terraform fmt -check`, `terraform init -backend=false` and
+`terraform validate`, with no credentials.
+
+To change real infrastructure, run the workflow by hand from `main`:
 
 ```bash
-# Create a feature branch
-git checkout -b feat/initial-deploy
+# 1. Review: plan only (no changes made)
+gh workflow run terraform.yml --ref main -f action=plan
 
-# Push to trigger plan
-git push origin feat/initial-deploy
-
-# Open a PR on GitHub
-gh pr create --title "Initial deploy" --body "Deploy full multi-cloud stack"
-
-# GitHub Actions runs terraform plan automatically
-# Review the plan output in the PR comments
-
-# Merge the PR → triggers terraform apply in production environment
-gh pr merge --squash
+# 2. Apply: plan, then wait for approval on the `production` environment,
+#    then apply that exact saved plan
+gh workflow run terraform.yml --ref main -f action=apply -f confirm=APPLY
 ```
 
 ---
@@ -240,26 +232,20 @@ gh pr merge --squash
 ## Workflow Summary
 
 ```
-Push to feature branch
-        │
-        ▼
-    GitHub Actions
-    terraform init
-    terraform validate
-    terraform fmt -check
-    terraform plan ──────────────► Comment on PR with plan output
-        │
-   Merge to main
-        │
-        ▼
-  Require approval
-  (production env)
-        │
-        ▼
-    terraform apply
-        │
-        ▼
-   Infrastructure deployed
+PR / push to main ──► validate job
+                      fmt -check · init -backend=false · validate
+                      (no secrets, no state, no cloud APIs)
+
+Actions → Run workflow (main)
+   action=plan  ──► plan job ──► plan printed in the log. Stop.
+
+   action=apply ──► plan job ──► saved tfplan uploaded (1-day artifact)
+   confirm=APPLY                    │
+                                    ▼
+                         production environment approval
+                                    │
+                                    ▼
+                    apply job: terraform apply tfplan  (no re-plan)
 ```
 
 ---
@@ -269,10 +255,10 @@ Push to feature branch
 All secrets should be rotated every 90 days. GitHub Actions will fail if a
 secret expires. Set calendar reminders for:
 
-- Azure client secret: expires `2026-12-31` (set in azure-sso module)
+- Azure app secrets: expire `2027-01-01` (set in the azure-sso module)
 - OCI API key: no expiry, but rotate annually as best practice
 - AWS access key: rotate every 90 days
 - Tailscale auth key: generate new reusable key if it expires
 
-To rotate: update the secret in GitHub → Settings → Secrets,
-then run `terraform apply` to propagate changes.
+To rotate: update the secret in GitHub → Settings → Secrets, then run the
+workflow manually (plan, then apply) to propagate changes.

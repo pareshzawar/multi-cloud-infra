@@ -5,30 +5,22 @@
 package_update: true
 package_upgrade: true
 
+# Host firewall: OCI Ubuntu images ship iptables rules managed by
+# iptables-persistent. We keep that and do NOT install ufw — the ufw package
+# declares "Breaks: iptables-persistent", so installing both fails.
 packages:
   - curl
   - wget
   - git
-  - ufw
   - fail2ban
   - unattended-upgrades
   - iptables-persistent
-
-# Open required iptables rules (OCI has internal firewall in addition to Security Lists)
-bootcmd:
-  - iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
-  - iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
-  - iptables -I INPUT 6 -m state --state NEW -p udp --dport 51820 -j ACCEPT
-  - iptables -I INPUT 6 -m state --state NEW -p udp --dport 41641 -j ACCEPT
-  - netfilter-persistent save
 
 write_files:
   # ── Docker Compose: all services ──────────────────────────────────────────
   - path: /opt/apps/docker-compose.yml
     permissions: '0644'
     content: |
-      version: '3.8'
-
       networks:
         internal:
           driver: bridge
@@ -39,8 +31,9 @@ write_files:
       services:
 
         # ── WireGuard VPN (wg-easy) ─────────────────────────────────────
+        # Pinned to v14: v15 replaced these env vars with a web setup wizard.
         wireguard:
-          image: ghcr.io/wg-easy/wg-easy:latest
+          image: ghcr.io/wg-easy/wg-easy:14
           container_name: wireguard
           restart: unless-stopped
           networks: [internal]
@@ -50,12 +43,13 @@ write_files:
             WG_DEFAULT_DNS: "1.1.1.1,8.8.8.8"
             WG_ALLOWED_IPS: "0.0.0.0/0"
             UI_PORT: "51821"
-            PASSWORD_HASH: ""   # Set via: wgpw YOUR_PASSWORD → paste hash here
+            # No PASSWORD_HASH: the UI is bound to localhost and only reachable
+            # through Caddy, which enforces basic auth (see Caddyfile).
           volumes:
             - ./wireguard:/etc/wireguard
           ports:
             - "51820:51820/udp"
-            - "51821:51821/tcp"
+            - "127.0.0.1:51821:51821/tcp"   # UI: localhost only, Caddy proxies
           cap_add:
             - NET_ADMIN
             - SYS_MODULE
@@ -76,14 +70,12 @@ write_files:
             WEBHOOK_URL: "https://${n8n_subdomain}/"
             GENERIC_TIMEZONE: "Asia/Kolkata"
             DB_TYPE: "sqlite"
-            N8N_ENCRYPTION_KEY: ""          # Generate: openssl rand -hex 32
-            # Azure SSO via OIDC
-            N8N_EXTERNAL_SECRETS_ENABLED: "true"
-            OIDC_ENABLED: "true"
-            OIDC_ISSUER: "https://login.microsoftonline.com/${azure_tenant_id}/v2.0"
-            OIDC_CLIENT_ID: "${n8n_oidc_client_id}"
-            OIDC_CLIENT_SECRET: "${n8n_oidc_secret}"
-            OIDC_REDIRECT_URL: "https://${n8n_subdomain}/rest/oauth2-credential/callback"
+            # N8N_ENCRYPTION_KEY is left unset on purpose: n8n generates one on
+            # first start and stores it in /home/node/.n8n/config. (An empty
+            # string here would be treated as a real, empty key.)
+            # Login: n8n's own user management. n8n OIDC/SSO is an Enterprise
+            # licence feature and is not configured via env vars, so the
+            # previous OIDC_* variables did nothing.
           volumes:
             - ./n8n:/home/node/.n8n
           ports:
@@ -120,6 +112,19 @@ write_files:
           ports:
             - "127.0.0.1:2368:2368"
 
+        # ── Portainer Agent ──────────────────────────────────────────────
+        # Lets Portainer on OCI Micro #2 manage this host's containers.
+        # Port 9001 is opened in the compute NSG to the micro2 NSG only.
+        portainer-agent:
+          image: portainer/agent:2.21.5
+          container_name: portainer-agent
+          restart: unless-stopped
+          ports:
+            - "9001:9001"
+          volumes:
+            - /var/run/docker.sock:/var/run/docker.sock
+            - /var/lib/docker/volumes:/var/lib/docker/volumes
+
   # ── Caddy config — TLS termination + reverse proxy ────────────────────────
   - path: /etc/caddy/Caddyfile
     permissions: '0644'
@@ -131,10 +136,16 @@ write_files:
         acme_ca https://acme-v02.api.letsencrypt.org/directory
       }
 
-      # Health check endpoint for OCI LB
+      # Health check endpoint for the OCI load balancers.
+      # Caddy runs "redir" before "respond" regardless of file order, so the
+      # two must be in separate handle blocks or /health gets redirected.
       :80 {
-        respond /health 200
-        redir https://{host}{uri} permanent
+        handle /health {
+          respond 200
+        }
+        handle {
+          redir https://{host}{uri} permanent
+        }
       }
 
       # Root domain → Ghost blog
@@ -160,13 +171,14 @@ write_files:
         encode gzip
       }
 
-      # WireGuard admin UI — Caddy adds basic auth layer
+      # WireGuard admin UI — Caddy basic auth is the only login in front of
+      # it. The placeholder below is replaced at first boot with the bcrypt hash of a
+      # random password saved to /root/wg-admin-password (see runcmd).
       ${wg_subdomain} {
-        reverse_proxy localhost:51821
-        basicauth {
-          # Generate with: caddy hash-password --plaintext YOUR_PASSWORD
-          admin $2a$14$CHANGEME_RUN_caddy_hash-password
+        basic_auth {
+          admin WG_ADMIN_HASH
         }
+        reverse_proxy localhost:51821
       }
 
   # ── Systemd service for Docker Compose ────────────────────────────────────
@@ -196,13 +208,30 @@ runcmd:
   - systemctl enable docker
   - systemctl start docker
 
+  # ── Host firewall (iptables, persisted) ────────────────────────────────────
+  # Runs once, after packages are installed (bootcmd ran before
+  # iptables-persistent existed and re-inserted duplicates on every boot).
+  - iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
+  - iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
+  - iptables -I INPUT 6 -m state --state NEW -p udp --dport 51820 -j ACCEPT
+  - iptables -I INPUT 6 -m state --state NEW -p udp --dport 41641 -j ACCEPT
+  - iptables -I INPUT 6 -m state --state NEW -p tcp --dport 9001 -s 10.0.0.0/16 -j ACCEPT
+  - netfilter-persistent save
+
   # ── Install Caddy ──────────────────────────────────────────────────────────
-  - apt install -y debian-keyring debian-archive-keyring apt-transport-https
+  - apt-get install -y debian-keyring debian-archive-keyring apt-transport-https
   - curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
   - curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-  - apt update && apt install -y caddy
+  # --force-confold keeps OUR /etc/caddy/Caddyfile (written above) instead of
+  # stopping at dpkg's "config file changed" prompt, which has no TTY here.
+  - apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::=--force-confold caddy
+  # Generate the WireGuard admin password and put its hash into the Caddyfile.
+  # Subshell so the strict umask does not leak into the rest of runcmd
+  # (cloud-init runs all runcmd entries as one script).
+  - (umask 077 && openssl rand -base64 24 > /root/wg-admin-password)
+  - sed -i "s|WG_ADMIN_HASH|$(caddy hash-password --plaintext "$(cat /root/wg-admin-password)")|" /etc/caddy/Caddyfile
   - systemctl enable caddy
-  - systemctl start caddy
+  - systemctl restart caddy
 
   # ── Install Tailscale ──────────────────────────────────────────────────────
   - curl -fsSL https://tailscale.com/install.sh | sh
@@ -210,22 +239,16 @@ runcmd:
   - systemctl enable tailscaled
 
   # ── Create app directories ─────────────────────────────────────────────────
-  - mkdir -p /opt/apps/{wireguard,n8n,motibot/config,motibot/data,ghost}
+  # Listed one by one: runcmd uses /bin/sh, which has no {a,b} brace expansion.
+  # They must exist (owned by uid 1000) BEFORE compose starts, otherwise Docker
+  # creates them as root and n8n/Ghost (uid 1000) cannot write their data.
+  - mkdir -p /opt/apps/wireguard /opt/apps/n8n /opt/apps/motibot/config /opt/apps/motibot/data /opt/apps/ghost
   - chown -R ubuntu:ubuntu /opt/apps
 
   # ── Start apps ────────────────────────────────────────────────────────────
   - systemctl daemon-reload
   - systemctl enable apps.service
   - systemctl start apps.service
-
-  # ── Configure UFW ─────────────────────────────────────────────────────────
-  - ufw default deny incoming
-  - ufw default allow outgoing
-  - ufw allow 80/tcp
-  - ufw allow 443/tcp
-  - ufw allow 51820/udp
-  - ufw allow 41641/udp
-  - ufw --force enable
 
   # ── Swapfile (not needed on 24 GB, but defensive) ─────────────────────────
   - fallocate -l 2G /swapfile

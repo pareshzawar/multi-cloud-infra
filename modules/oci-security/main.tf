@@ -48,23 +48,6 @@ resource "oci_core_network_security_group_security_rule" "lb_https_in" {
   }
 }
 
-# WireGuard UDP — inbound to LB (LB passes UDP to backend)
-resource "oci_core_network_security_group_security_rule" "lb_wireguard_in" {
-  network_security_group_id = oci_core_network_security_group.lb.id
-  direction                 = "INGRESS"
-  protocol                  = "17" # UDP
-  source                    = "0.0.0.0/0"
-  source_type               = "CIDR_BLOCK"
-  stateless                 = true # UDP is stateless
-
-  udp_options {
-    destination_port_range {
-      min = 51820
-      max = 51820
-    }
-  }
-}
-
 # All egress from LB allowed (to backend compute)
 resource "oci_core_network_security_group_security_rule" "lb_egress_all" {
   network_security_group_id = oci_core_network_security_group.lb.id
@@ -119,14 +102,15 @@ resource "oci_core_network_security_group_security_rule" "compute_https_from_lb"
   }
 }
 
-# WireGuard from LB
+# WireGuard from the Network Load Balancer. The NLB is not a member of the LB
+# NSG, so match on the public subnet CIDR where its private IP lives.
 resource "oci_core_network_security_group_security_rule" "compute_wg_from_lb" {
   network_security_group_id = oci_core_network_security_group.compute.id
   direction                 = "INGRESS"
   protocol                  = "17"
-  source                    = oci_core_network_security_group.lb.id
-  source_type               = "NETWORK_SECURITY_GROUP"
-  stateless                 = true
+  source                    = var.public_subnet_cidr
+  source_type               = "CIDR_BLOCK"
+  stateless                 = false
 
   udp_options {
     destination_port_range {
@@ -172,6 +156,23 @@ resource "oci_core_network_security_group_security_rule" "compute_tailscale_in" 
   }
 }
 
+# Portainer agent on A1 — only the ops node (micro2 NSG) may connect
+resource "oci_core_network_security_group_security_rule" "compute_portainer_agent_from_micro2" {
+  network_security_group_id = oci_core_network_security_group.compute.id
+  direction                 = "INGRESS"
+  protocol                  = "6"
+  source                    = oci_core_network_security_group.micro2.id
+  source_type               = "NETWORK_SECURITY_GROUP"
+  stateless                 = false
+
+  tcp_options {
+    destination_port_range {
+      min = 9001
+      max = 9001
+    }
+  }
+}
+
 # All egress from compute (internet access via NAT GW)
 resource "oci_core_network_security_group_security_rule" "compute_egress_all" {
   network_security_group_id = oci_core_network_security_group.compute.id
@@ -182,123 +183,10 @@ resource "oci_core_network_security_group_security_rule" "compute_egress_all" {
   stateless                 = false
 }
 
-# ── Security List: Public Subnet ──────────────────────────────────────────────
-
-resource "oci_core_security_list" "public" {
-  compartment_id = var.compartment_id
-  vcn_id         = var.vcn_id
-  display_name   = "sl-public-subnet"
-  freeform_tags  = var.tags
-
-  ingress_security_rules {
-    protocol  = "6"
-    source    = "0.0.0.0/0"
-    stateless = false
-    tcp_options {
-      min = 80
-      max = 80
-    }
-  }
-
-  ingress_security_rules {
-    protocol  = "6"
-    source    = "0.0.0.0/0"
-    stateless = false
-    tcp_options {
-      min = 443
-      max = 443
-    }
-  }
-
-  ingress_security_rules {
-    protocol  = "17"
-    source    = "0.0.0.0/0"
-    stateless = true
-    udp_options {
-      min = 51820
-      max = 51820
-    }
-  }
-
-  # ICMP — allow ping for troubleshooting
-  ingress_security_rules {
-    protocol  = "1"
-    source    = "0.0.0.0/0"
-    stateless = false
-    icmp_options {
-      type = 3
-      code = 4
-    }
-  }
-
-  egress_security_rules {
-    protocol    = "all"
-    destination = "0.0.0.0/0"
-    stateless   = false
-  }
-}
-
-# ── Security List: Private Subnet ─────────────────────────────────────────────
-
-resource "oci_core_security_list" "private" {
-  compartment_id = var.compartment_id
-  vcn_id         = var.vcn_id
-  display_name   = "sl-private-subnet"
-  freeform_tags  = var.tags
-
-  # Accept traffic from public subnet (LB → compute)
-  ingress_security_rules {
-    protocol  = "6"
-    source    = var.public_subnet_cidr
-    stateless = false
-    tcp_options {
-      min = 1
-      max = 65535
-    }
-  }
-
-  ingress_security_rules {
-    protocol  = "17"
-    source    = "0.0.0.0/0"
-    stateless = true
-    udp_options {
-      min = 41641
-      max = 41641
-    }
-  }
-
-  ingress_security_rules {
-    protocol  = "17"
-    source    = "0.0.0.0/0"
-    stateless = true
-    udp_options {
-      min = 51820
-      max = 51820
-    }
-  }
-
-  # ICMP within VCN
-  ingress_security_rules {
-    protocol  = "1"
-    source    = "10.0.0.0/16"
-    stateless = false
-    icmp_options {
-      type = 3
-      code = 4
-    }
-  }
-
-  egress_security_rules {
-    protocol    = "all"
-    destination = "0.0.0.0/0"
-    stateless   = false
-  }
-}
-
 # ── NSG: Micro #2 (Ops node) ─────────────────────────────────────────────────
 # Uptime Kuma + Portainer + Watchtower
-# Admin UIs bound to localhost — only Tailscale tunnel reaches them
-# Portainer agent port (9001) open to OCI VCN range so A1 can connect
+# Admin UIs bound to localhost and published to the tailnet with
+# `tailscale serve` (HTTPS) — no inbound VCN/internet port is needed for them.
 
 resource "oci_core_network_security_group" "micro2" {
   compartment_id = var.compartment_id
@@ -320,23 +208,6 @@ resource "oci_core_network_security_group_security_rule" "micro2_tailscale_in" {
     destination_port_range {
       min = 41641
       max = 41641
-    }
-  }
-}
-
-# Portainer agent — reachable from OCI VCN private range (A1 → micro2 direct)
-resource "oci_core_network_security_group_security_rule" "micro2_portainer_agent" {
-  network_security_group_id = oci_core_network_security_group.micro2.id
-  direction                 = "INGRESS"
-  protocol                  = "6"
-  source                    = "10.0.0.0/16" # OCI VCN — A1 is in 10.0.2.0/24
-  source_type               = "CIDR_BLOCK"
-  stateless                 = false
-
-  tcp_options {
-    destination_port_range {
-      min = 9001
-      max = 9001
     }
   }
 }

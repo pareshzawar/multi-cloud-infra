@@ -7,14 +7,7 @@ variable "tailscale_auth_key" {
 }
 variable "tags" { type = map(string) }
 
-variable "domain_name" {
-  description = "Root domain name for Vaultwarden DOMAIN env var"
+variable "backup_bucket_name" {
+  description = "AWS S3 bucket holding the Vaultwarden db-YYYY-MM-DD.sqlite3 snapshots (written by modules/aws-vault)"
   type        = string
-  default     = "yourdomain.com"
-}
-
-variable "n8n_tailscale_ip" {
-  description = "Tailscale IP of OCI A1 (for webhook relay to forward to n8n). Set after first deploy."
-  type        = string
-  default     = ""
 }

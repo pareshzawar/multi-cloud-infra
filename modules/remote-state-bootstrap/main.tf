@@ -13,7 +13,7 @@
 # SETUP ORDER:
 #   1. Run this module standalone first (local state is fine for bootstrap)
 #   2. Get the namespace: oci os ns get
-#   3. Uncomment the backend block in environments/prod/main.tf
+#   3. Put bucket/namespace/region into environments/prod/backend.tf
 #   4. Run: terraform init -migrate-state
 #   5. Delete local terraform.tfstate
 ###############################################################################

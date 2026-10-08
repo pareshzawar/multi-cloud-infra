@@ -5,13 +5,14 @@
 # Role: Ops & Monitoring node
 #   - Uptime Kuma      (moved from GCP — monitors all 5 nodes)
 #   - Portainer CE     (Docker GUI for managing A1 + this instance remotely)
-#   - Watchtower       (centralised auto-update scheduler for all servers)
-#   - Fail2ban syslog  (aggregates auth logs from A1 + vault over Tailscale)
+#   - Watchtower       (auto-updates the containers on THIS host)
+#   - Fail2ban         (local SSH protection)
 #
 # Network: same OCI VCN private subnet as Ampere A1
-#   → A1 services reachable on internal IPs (no Tailscale hop, low latency)
-#   → All admin UIs locked to Tailscale CGNAT range (100.64.0.0/10)
 #   → No public IP assigned
+#   → Admin UIs listen on 127.0.0.1 only and are published to the tailnet with
+#     `tailscale serve` (HTTPS, MagicDNS name). Requires "HTTPS certificates"
+#     to be enabled in the Tailscale admin console.
 ###############################################################################
 
 data "oci_core_images" "ubuntu_amd" {
@@ -53,7 +54,8 @@ resource "oci_core_instance" "micro2" {
 
   lifecycle {
     prevent_destroy = true
-    ignore_changes  = [source_details[0].source_id]
+    # user_data changes force replacement (blocked by prevent_destroy).
+    ignore_changes = [source_details[0].source_id, metadata["user_data"]]
   }
 
   freeform_tags = var.tags
@@ -67,13 +69,15 @@ locals {
 
     # ── System ────────────────────────────────────────────────────────────
     apt-get update && apt-get upgrade -y
-    apt-get install -y curl wget git ufw fail2ban unattended-upgrades \
+    # No ufw: it declares "Breaks: iptables-persistent", and OCI images rely
+    # on iptables-persistent. With `set -e`, installing both aborted the
+    # whole bootstrap at this line.
+    apt-get install -y curl wget git fail2ban unattended-upgrades \
                        iptables-persistent netfilter-persistent
 
-    # ── OCI internal firewall (iptables) — required in addition to NSG ───
-    iptables -I INPUT 6 -m state --state NEW -p tcp --dport 9000 -j ACCEPT   # Portainer
-    iptables -I INPUT 6 -m state --state NEW -p tcp --dport 9001 -j ACCEPT   # Portainer agent
-    iptables -I INPUT 6 -m state --state NEW -p tcp --dport 3001 -j ACCEPT   # Uptime Kuma
+    # ── OCI host firewall (iptables) — required in addition to the NSG ───
+    # Only Tailscale needs an inbound port; admin UIs are served over the
+    # tailnet by tailscaled itself.
     iptables -I INPUT 6 -m state --state NEW -p udp --dport 41641 -j ACCEPT  # Tailscale
     netfilter-persistent save
 
@@ -96,19 +100,18 @@ locals {
     tailscale up \
       --authkey=${var.tailscale_auth_key} \
       --hostname=oci-micro2-ops \
-      --accept-routes \
-      --advertise-tags=tag:ops
+      --accept-routes
+    # (--advertise-tags removed: it fails unless the tailnet ACL defines
+    # tagOwners for tag:ops, and with set -e that aborted the bootstrap.)
     systemctl enable tailscaled
     sleep 8
 
     # ── App directories ───────────────────────────────────────────────────
-    mkdir -p /opt/ops/{uptime-kuma,portainer,watchtower-config}
+    mkdir -p /opt/ops/uptime-kuma /opt/ops/portainer
     chown -R ubuntu:ubuntu /opt/ops
 
     # ── Docker Compose ────────────────────────────────────────────────────
     cat > /opt/ops/docker-compose.yml << 'COMPOSE'
-    version: '3.8'
-
     networks:
       ops-internal:
         driver: bridge
@@ -126,7 +129,7 @@ locals {
         container_name: uptime-kuma
         restart: unless-stopped
         networks: [ops-internal]
-        # Bind to localhost — Tailscale tunnel exposes externally
+        # Localhost only — published to the tailnet by `tailscale serve` below
         ports:
           - "127.0.0.1:3001:3001"
         volumes:
@@ -135,33 +138,22 @@ locals {
           - NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
       # ── Portainer CE ────────────────────────────────────────────────────
-      # Docker GUI — manages containers on THIS instance and A1 (via Portainer agent)
-      # Admin UI at :9000, locked to Tailscale range by NSG + UFW
+      # Docker GUI — manages THIS host via the local socket, and A1 via the
+      # Portainer agent running on A1 (<a1_private_ip>:9001).
+      # (Previously a local agent also published host port 9001, which
+      # clashed with the server's own 9001 mapping, so one failed to start.)
+      # Version pinned to match the agent image on A1.
       portainer:
-        image: portainer/portainer-ce:latest
+        image: portainer/portainer-ce:2.21.5
         container_name: portainer
         restart: unless-stopped
         networks: [ops-internal]
         ports:
-          - "127.0.0.1:9000:9000"    # UI — Tailscale only
-          - "9001:9001"              # Agent port — reachable by A1 over private subnet
+          - "127.0.0.1:9000:9000"    # UI — localhost; tailnet via tailscale serve
         volumes:
           - /var/run/docker.sock:/var/run/docker.sock
           - ./portainer:/data
         command: --admin-password-file /data/admin_password
-
-      # ── Portainer Agent (on THIS instance) ──────────────────────────────
-      # Portainer CE connects to agents on remote hosts (A1)
-      portainer-agent:
-        image: portainer/agent:latest
-        container_name: portainer-agent
-        restart: unless-stopped
-        networks: [ops-internal]
-        ports:
-          - "9001:9001"
-        volumes:
-          - /var/run/docker.sock:/var/run/docker.sock
-          - /var/lib/docker/volumes:/var/lib/docker/volumes
 
       # ── Watchtower ──────────────────────────────────────────────────────
       # Centralised auto-updater — updates containers on THIS instance
@@ -177,25 +169,28 @@ locals {
           WATCHTOWER_SCHEDULE: "0 0 4 * * *"     # 4 AM daily
           WATCHTOWER_CLEANUP: "true"              # Remove old images after update
           WATCHTOWER_INCLUDE_STOPPED: "false"
-          WATCHTOWER_NOTIFICATIONS: "email"
-          WATCHTOWER_NOTIFICATION_EMAIL_FROM: "watchtower@${var.domain_name}"
-          WATCHTOWER_NOTIFICATION_EMAIL_TO: "${var.alert_email}"
-          WATCHTOWER_NOTIFICATION_EMAIL_SERVER: "smtp.gmail.com"
-          WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PORT: "587"
+          # Notifications are off: Gmail SMTP needs a username + app password,
+          # which must not be inlined here. To enable, set
+          # WATCHTOWER_NOTIFICATION_URL (shoutrrr format) from a secret file.
           TZ: "Asia/Kolkata"
 
     COMPOSE
 
-    # ── Generate Portainer admin password hash ─────────────────────────
-    # Uses a placeholder — update with: htpasswd -nb -B admin <password>
-    PORTAINER_PASS=$(openssl rand -base64 24)
-    echo "$PORTAINER_PASS" > /opt/ops/portainer/admin_password
-    echo "Portainer initial password: $PORTAINER_PASS" >> /var/log/cloud-init-micro2.log
-    chmod 600 /opt/ops/portainer/admin_password
+    # ── Generate Portainer initial admin password (plain text file) ──────
+    # Read it once with: sudo cat /opt/ops/portainer/admin_password
+    # (No longer echoed into the bootstrap log.)
+    (umask 077 && openssl rand -base64 24 > /opt/ops/portainer/admin_password)
 
     # ── Start ops stack ───────────────────────────────────────────────────
     cd /opt/ops
     docker compose up -d
+
+    # ── Publish admin UIs to the tailnet (HTTPS, tailnet members only) ────
+    #   https://oci-micro2-ops.<tailnet>.ts.net/       → Uptime Kuma
+    #   https://oci-micro2-ops.<tailnet>.ts.net:8443/  → Portainer
+    # Needs MagicDNS + HTTPS enabled for the tailnet; don't abort if not.
+    tailscale serve --bg --https=443  http://127.0.0.1:3001 || echo "WARN: enable HTTPS in Tailscale, then re-run tailscale serve"
+    tailscale serve --bg --https=8443 http://127.0.0.1:9000 || echo "WARN: enable HTTPS in Tailscale, then re-run tailscale serve"
 
     # ── Systemd service ───────────────────────────────────────────────────
     cat > /etc/systemd/system/ops.service << 'UNIT'
@@ -218,16 +213,6 @@ locals {
 
     systemctl daemon-reload
     systemctl enable ops.service
-
-    # ── UFW ───────────────────────────────────────────────────────────────
-    ufw default deny incoming
-    ufw default allow outgoing
-    # Tailscale UDP
-    ufw allow 41641/udp comment "Tailscale"
-    # Portainer agent — reachable from OCI private subnet only (A1 → micro2)
-    ufw allow from 10.0.0.0/16 to any port 9001 comment "Portainer agent - OCI VCN only"
-    # All admin UIs (9000, 3001) — NO public rule; accessible only via Tailscale tunnel
-    ufw --force enable
 
     # ── Fail2ban ──────────────────────────────────────────────────────────
     systemctl enable fail2ban && systemctl start fail2ban
