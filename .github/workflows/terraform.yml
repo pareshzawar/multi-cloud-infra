@@ -1,25 +1,58 @@
 name: Terraform
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SAFETY MODEL — this repo is an archived lab snapshot.
+#
+#   pull_request / push to main → "validate" only: fmt + init (no backend) +
+#                                  validate. Uses NO cloud credentials and can
+#                                  never create, change or destroy anything.
+#
+#   workflow_dispatch (manual)  → "plan", and optionally "apply". Apply needs:
+#                                    1. action = apply
+#                                    2. confirm = "APPLY" typed exactly
+#                                    3. approval on the `production` environment
+#                                  and it applies the exact saved plan that the
+#                                  plan job produced — it never re-plans.
+#
+# Nothing in this file provisions infrastructure automatically.
+# ─────────────────────────────────────────────────────────────────────────────
+
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "plan = show changes only; apply = plan then apply after approval"
+        type: choice
+        options: [plan, apply]
+        default: plan
+      confirm:
+        description: "Type APPLY to allow the apply job to run (ignored for plan)"
+        type: string
+        default: ""
+
+# Never let two runs touch the same state at once (the S3-compatible OCI
+# backend has no state locking — see README "Known issues").
+concurrency:
+  group: terraform-prod
+  cancel-in-progress: false
 
 env:
   TF_WORKING_DIR: environments/prod
   TF_VERSION: 1.7.5
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  TF_IN_AUTOMATION: "true"
 
 jobs:
-  terraform-plan:
-    name: Terraform Plan
+  # ── Static checks: no secrets, no backend, no cloud API calls ──────────────
+  validate:
+    name: Validate (no cloud access)
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-
+    if: github.event_name != 'workflow_dispatch'
     permissions:
       contents: read
-      pull-requests: write
 
     steps:
       - name: Checkout
@@ -29,126 +62,153 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Format check
+        run: terraform fmt -check -recursive -diff
+
+      # -backend=false: do not touch the remote state bucket at all.
+      - name: Init (providers only)
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -backend=false -input=false
+
+      - name: Validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform validate
+
+  # ── Manual plan ─────────────────────────────────────────────────────────────
+  plan:
+    name: Terraform Plan (manual)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+
+    # Variables shared by init/plan. AWS_* keys are set per step because the
+    # S3-compatible state backend (OCI Customer Secret Keys) and the AWS
+    # provider (real AWS keys) both read the same env var names.
+    env:
+      TF_VAR_aws_region: ap-south-1
+      TF_VAR_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      TF_VAR_domain_name: ${{ secrets.DOMAIN_NAME }}
+      TF_VAR_gcp_project_id: ${{ secrets.GCP_PROJECT_ID }}
+      TF_VAR_gcp_billing_account_id: ${{ secrets.GCP_BILLING_ACCOUNT_ID }}
+      TF_VAR_oci_compartment_id: ${{ secrets.OCI_COMPARTMENT_ID }}
+      TF_VAR_oci_availability_domain: ${{ secrets.OCI_AVAILABILITY_DOMAIN }}
+      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+      TF_VAR_oci_tenancy_ocid: ${{ secrets.OCI_TENANCY_OCID }}
+      TF_VAR_oci_user_ocid: ${{ secrets.OCI_USER_OCID }}
+      TF_VAR_oci_fingerprint: ${{ secrets.OCI_FINGERPRINT }}
+      TF_VAR_oci_private_key: ${{ secrets.OCI_PRIVATE_KEY }}
+      TF_VAR_oci_region: ${{ secrets.OCI_REGION }}
+      TF_VAR_oci2_tenancy_ocid: ${{ secrets.OCI2_TENANCY_OCID }}
+      TF_VAR_oci2_user_ocid: ${{ secrets.OCI2_USER_OCID }}
+      TF_VAR_oci2_fingerprint: ${{ secrets.OCI2_FINGERPRINT }}
+      TF_VAR_oci2_private_key: ${{ secrets.OCI2_PRIVATE_KEY }}
+      TF_VAR_oci2_region: ${{ secrets.OCI2_REGION }}
+      TF_VAR_oci2_availability_domain: ${{ secrets.OCI2_AVAILABILITY_DOMAIN }}
+      TF_VAR_oci2_compartment_id: ${{ secrets.OCI2_COMPARTMENT_ID }}
+      TF_VAR_tailscale_auth_key: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      TF_VAR_cloudflare_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      TF_VAR_azure_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_azure_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_azure_client_secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+      TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_CREDENTIALS_JSON }}
 
-      # Init uses OCI Customer Secret Keys for the S3-compatible state backend.
-      # configure-aws-credentials is intentionally NOT called before this step —
-      # that action exports job-level env vars that cannot be overridden by step
-      # env blocks, causing the AWS provider to receive OCI keys during init.
+      # Init talks only to the state bucket → OCI Customer Secret Keys.
       - name: Terraform Init
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
-          AWS_ACCESS_KEY_ID:     ${{ secrets.OCI_STATE_ACCESS_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.OCI_STATE_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.OCI_STATE_SECRET_KEY }}
-          AWS_DEFAULT_REGION:    ap-south-1
-          AWS_REGION:            ap-south-1
-          TF_VAR_aws_region:     ap-south-1
-          TF_VAR_aws_account_id:          ${{ secrets.AWS_ACCOUNT_ID }}
-          TF_VAR_domain_name:             ${{ secrets.DOMAIN_NAME }}
-          TF_VAR_gcp_project_id:          ${{ secrets.GCP_PROJECT_ID }}
-          TF_VAR_gcp_billing_account_id:  ${{ secrets.GCP_BILLING_ACCOUNT_ID }}
-          TF_VAR_oci_compartment_id:      ${{ secrets.OCI_COMPARTMENT_ID }}
-          TF_VAR_oci_availability_domain: ${{ secrets.OCI_AVAILABILITY_DOMAIN }}
-          TF_VAR_ssh_public_key:          ${{ secrets.SSH_PUBLIC_KEY }}
-          TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
-          TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
-          TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
-          TF_VAR_oci_private_key:         ${{ secrets.OCI_PRIVATE_KEY }}
-          TF_VAR_oci_region:              ${{ secrets.OCI_REGION }}
-          TF_VAR_oci2_tenancy_ocid:        ${{ secrets.OCI2_TENANCY_OCID }}
-          TF_VAR_oci2_user_ocid:           ${{ secrets.OCI2_USER_OCID }}
-          TF_VAR_oci2_fingerprint:         ${{ secrets.OCI2_FINGERPRINT }}
-          TF_VAR_oci2_private_key:         ${{ secrets.OCI2_PRIVATE_KEY }}
-          TF_VAR_oci2_region:              ${{ secrets.OCI2_REGION }}
-          TF_VAR_oci2_availability_domain: ${{ secrets.OCI2_AVAILABILITY_DOMAIN }}
-          TF_VAR_oci2_compartment_id:      ${{ secrets.OCI2_COMPARTMENT_ID }}
-          TF_VAR_tailscale_auth_key:      ${{ secrets.TAILSCALE_AUTH_KEY }}
-          TF_VAR_cloudflare_api_token:    ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          TF_VAR_cloudflare_zone_id:      ${{ secrets.CLOUDFLARE_ZONE_ID }}
-          TF_VAR_azure_tenant_id:         ${{ secrets.AZURE_TENANT_ID }}
-          TF_VAR_azure_client_id:         ${{ secrets.AZURE_CLIENT_ID }}
-          TF_VAR_azure_client_secret:     ${{ secrets.AZURE_CLIENT_SECRET }}
-          TF_VAR_azure_subscription_id:   ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          TF_VAR_alert_email:             ${{ secrets.ALERT_EMAIL }}
-        run: terraform init -reconfigure -backend-config="access_key=${{ secrets.OCI_STATE_ACCESS_KEY }}" -backend-config="secret_key=${{ secrets.OCI_STATE_SECRET_KEY }}"
+          AWS_REGION: ap-south-1
+        run: >-
+          terraform init -input=false
+          -backend-config="access_key=${{ secrets.OCI_STATE_ACCESS_KEY }}"
+          -backend-config="secret_key=${{ secrets.OCI_STATE_SECRET_KEY }}"
 
-      # Plan uses real AWS creds — OCI state keys are no longer needed after init.
+      # Plan talks to the clouds → real AWS keys for the AWS provider.
       - name: Terraform Plan
-        id: plan
         working-directory: ${{ env.TF_WORKING_DIR }}
-        continue-on-error: true
         env:
-          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION:    ap-south-1
-          AWS_REGION:            ap-south-1
-          TF_VAR_aws_region:     ap-south-1
-          TF_VAR_aws_account_id:          ${{ secrets.AWS_ACCOUNT_ID }}
-          TF_VAR_domain_name:             ${{ secrets.DOMAIN_NAME }}
-          TF_VAR_gcp_project_id:          ${{ secrets.GCP_PROJECT_ID }}
-          TF_VAR_gcp_billing_account_id:  ${{ secrets.GCP_BILLING_ACCOUNT_ID }}
-          TF_VAR_oci_compartment_id:      ${{ secrets.OCI_COMPARTMENT_ID }}
-          TF_VAR_oci_availability_domain: ${{ secrets.OCI_AVAILABILITY_DOMAIN }}
-          TF_VAR_ssh_public_key:          ${{ secrets.SSH_PUBLIC_KEY }}
-          TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
-          TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
-          TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
-          TF_VAR_oci_private_key:         ${{ secrets.OCI_PRIVATE_KEY }}
-          TF_VAR_oci_region:              ${{ secrets.OCI_REGION }}
-          TF_VAR_oci2_tenancy_ocid:        ${{ secrets.OCI2_TENANCY_OCID }}
-          TF_VAR_oci2_user_ocid:           ${{ secrets.OCI2_USER_OCID }}
-          TF_VAR_oci2_fingerprint:         ${{ secrets.OCI2_FINGERPRINT }}
-          TF_VAR_oci2_private_key:         ${{ secrets.OCI2_PRIVATE_KEY }}
-          TF_VAR_oci2_region:              ${{ secrets.OCI2_REGION }}
-          TF_VAR_oci2_availability_domain: ${{ secrets.OCI2_AVAILABILITY_DOMAIN }}
-          TF_VAR_oci2_compartment_id:      ${{ secrets.OCI2_COMPARTMENT_ID }}
-          TF_VAR_tailscale_auth_key:      ${{ secrets.TAILSCALE_AUTH_KEY }}
-          TF_VAR_cloudflare_api_token:    ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          TF_VAR_cloudflare_zone_id:      ${{ secrets.CLOUDFLARE_ZONE_ID }}
-          TF_VAR_azure_tenant_id:         ${{ secrets.AZURE_TENANT_ID }}
-          TF_VAR_azure_client_id:         ${{ secrets.AZURE_CLIENT_ID }}
-          TF_VAR_azure_client_secret:     ${{ secrets.AZURE_CLIENT_SECRET }}
-          TF_VAR_azure_subscription_id:   ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          TF_VAR_alert_email:             ${{ secrets.ALERT_EMAIL }}
-        run: terraform plan -no-color -out=tfplan
+          AWS_REGION: ap-south-1
+        run: terraform plan -input=false -no-color -out=tfplan
 
-      - name: Post plan as PR comment
-        uses: actions/github-script@v7
-        if: always()
+      # The apply job applies THIS file, so what the approver reviewed in the
+      # log above is exactly what runs. The lock file pins provider versions so
+      # the saved plan stays valid. Plan files can contain sensitive values →
+      # keep the artifact for one day only.
+      - name: Upload plan
+        if: inputs.action == 'apply'
+        uses: actions/upload-artifact@v4
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const output = `#### Terraform Plan ${{ steps.plan.outcome == 'success' && '✅' || '❌' }} \`${{ steps.plan.outcome }}\`
+          name: tfplan
+          include-hidden-files: true
+          path: |
+            ${{ env.TF_WORKING_DIR }}/tfplan
+            ${{ env.TF_WORKING_DIR }}/.terraform.lock.hcl
+          retention-days: 1
 
-            <details><summary>Show Plan</summary>
-
-            \`\`\`terraform
-            ${{ steps.plan.outputs.stdout || 'No plan output captured.' }}
-            \`\`\`
-
-            </details>
-
-            *Triggered by @${{ github.actor }} · \`${{ github.event_name }}\` · ${{ github.sha }}*`;
-
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: output
-            });
-
-  terraform-apply:
-    name: Terraform Apply
+  # ── Manual apply of the saved plan (gated three ways) ───────────────────────
+  apply:
+    name: Terraform Apply (manual, approved)
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    environment: production
-
+    needs: plan
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.action == 'apply' &&
+      inputs.confirm == 'APPLY' &&
+      github.ref == 'refs/heads/main'
+    environment: production # add required reviewers to this environment
     permissions:
       contents: read
+
+    env:
+      TF_VAR_aws_region: ap-south-1
+      TF_VAR_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      TF_VAR_domain_name: ${{ secrets.DOMAIN_NAME }}
+      TF_VAR_gcp_project_id: ${{ secrets.GCP_PROJECT_ID }}
+      TF_VAR_gcp_billing_account_id: ${{ secrets.GCP_BILLING_ACCOUNT_ID }}
+      TF_VAR_oci_compartment_id: ${{ secrets.OCI_COMPARTMENT_ID }}
+      TF_VAR_oci_availability_domain: ${{ secrets.OCI_AVAILABILITY_DOMAIN }}
+      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+      TF_VAR_oci_tenancy_ocid: ${{ secrets.OCI_TENANCY_OCID }}
+      TF_VAR_oci_user_ocid: ${{ secrets.OCI_USER_OCID }}
+      TF_VAR_oci_fingerprint: ${{ secrets.OCI_FINGERPRINT }}
+      TF_VAR_oci_private_key: ${{ secrets.OCI_PRIVATE_KEY }}
+      TF_VAR_oci_region: ${{ secrets.OCI_REGION }}
+      TF_VAR_oci2_tenancy_ocid: ${{ secrets.OCI2_TENANCY_OCID }}
+      TF_VAR_oci2_user_ocid: ${{ secrets.OCI2_USER_OCID }}
+      TF_VAR_oci2_fingerprint: ${{ secrets.OCI2_FINGERPRINT }}
+      TF_VAR_oci2_private_key: ${{ secrets.OCI2_PRIVATE_KEY }}
+      TF_VAR_oci2_region: ${{ secrets.OCI2_REGION }}
+      TF_VAR_oci2_availability_domain: ${{ secrets.OCI2_AVAILABILITY_DOMAIN }}
+      TF_VAR_oci2_compartment_id: ${{ secrets.OCI2_COMPARTMENT_ID }}
+      TF_VAR_tailscale_auth_key: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      TF_VAR_cloudflare_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      TF_VAR_azure_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_azure_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_azure_client_secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+      TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
 
     steps:
       - name: Checkout
@@ -158,84 +218,34 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_CREDENTIALS_JSON }}
 
+      - name: Download reviewed plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_WORKING_DIR }}
+
       - name: Terraform Init
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
-          AWS_ACCESS_KEY_ID:     ${{ secrets.OCI_STATE_ACCESS_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.OCI_STATE_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.OCI_STATE_SECRET_KEY }}
-          AWS_DEFAULT_REGION:    ap-south-1
-          AWS_REGION:            ap-south-1
-          TF_VAR_aws_region:     ap-south-1
-          TF_VAR_aws_account_id:          ${{ secrets.AWS_ACCOUNT_ID }}
-          TF_VAR_domain_name:             ${{ secrets.DOMAIN_NAME }}
-          TF_VAR_gcp_project_id:          ${{ secrets.GCP_PROJECT_ID }}
-          TF_VAR_gcp_billing_account_id:  ${{ secrets.GCP_BILLING_ACCOUNT_ID }}
-          TF_VAR_oci_compartment_id:      ${{ secrets.OCI_COMPARTMENT_ID }}
-          TF_VAR_oci_availability_domain: ${{ secrets.OCI_AVAILABILITY_DOMAIN }}
-          TF_VAR_ssh_public_key:          ${{ secrets.SSH_PUBLIC_KEY }}
-          TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
-          TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
-          TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
-          TF_VAR_oci_private_key:         ${{ secrets.OCI_PRIVATE_KEY }}
-          TF_VAR_oci_region:              ${{ secrets.OCI_REGION }}
-          TF_VAR_oci2_tenancy_ocid:        ${{ secrets.OCI2_TENANCY_OCID }}
-          TF_VAR_oci2_user_ocid:           ${{ secrets.OCI2_USER_OCID }}
-          TF_VAR_oci2_fingerprint:         ${{ secrets.OCI2_FINGERPRINT }}
-          TF_VAR_oci2_private_key:         ${{ secrets.OCI2_PRIVATE_KEY }}
-          TF_VAR_oci2_region:              ${{ secrets.OCI2_REGION }}
-          TF_VAR_oci2_availability_domain: ${{ secrets.OCI2_AVAILABILITY_DOMAIN }}
-          TF_VAR_oci2_compartment_id:      ${{ secrets.OCI2_COMPARTMENT_ID }}
-          TF_VAR_tailscale_auth_key:      ${{ secrets.TAILSCALE_AUTH_KEY }}
-          TF_VAR_cloudflare_api_token:    ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          TF_VAR_cloudflare_zone_id:      ${{ secrets.CLOUDFLARE_ZONE_ID }}
-          TF_VAR_azure_tenant_id:         ${{ secrets.AZURE_TENANT_ID }}
-          TF_VAR_azure_client_id:         ${{ secrets.AZURE_CLIENT_ID }}
-          TF_VAR_azure_client_secret:     ${{ secrets.AZURE_CLIENT_SECRET }}
-          TF_VAR_azure_subscription_id:   ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          TF_VAR_alert_email:             ${{ secrets.ALERT_EMAIL }}
-        run: terraform init -reconfigure -backend-config="access_key=${{ secrets.OCI_STATE_ACCESS_KEY }}" -backend-config="secret_key=${{ secrets.OCI_STATE_SECRET_KEY }}"
+          AWS_REGION: ap-south-1
+        run: >-
+          terraform init -input=false
+          -backend-config="access_key=${{ secrets.OCI_STATE_ACCESS_KEY }}"
+          -backend-config="secret_key=${{ secrets.OCI_STATE_SECRET_KEY }}"
 
-      - name: Terraform Plan + Apply
+      - name: Terraform Apply (saved plan only)
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
-          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION:    ap-south-1
-          AWS_REGION:            ap-south-1
-          TF_VAR_aws_region:     ap-south-1
-          TF_VAR_aws_account_id:          ${{ secrets.AWS_ACCOUNT_ID }}
-          TF_VAR_domain_name:             ${{ secrets.DOMAIN_NAME }}
-          TF_VAR_gcp_project_id:          ${{ secrets.GCP_PROJECT_ID }}
-          TF_VAR_gcp_billing_account_id:  ${{ secrets.GCP_BILLING_ACCOUNT_ID }}
-          TF_VAR_oci_compartment_id:      ${{ secrets.OCI_COMPARTMENT_ID }}
-          TF_VAR_oci_availability_domain: ${{ secrets.OCI_AVAILABILITY_DOMAIN }}
-          TF_VAR_ssh_public_key:          ${{ secrets.SSH_PUBLIC_KEY }}
-          TF_VAR_oci_tenancy_ocid:        ${{ secrets.OCI_TENANCY_OCID }}
-          TF_VAR_oci_user_ocid:           ${{ secrets.OCI_USER_OCID }}
-          TF_VAR_oci_fingerprint:         ${{ secrets.OCI_FINGERPRINT }}
-          TF_VAR_oci_private_key:         ${{ secrets.OCI_PRIVATE_KEY }}
-          TF_VAR_oci_region:              ${{ secrets.OCI_REGION }}
-          TF_VAR_oci2_tenancy_ocid:        ${{ secrets.OCI2_TENANCY_OCID }}
-          TF_VAR_oci2_user_ocid:           ${{ secrets.OCI2_USER_OCID }}
-          TF_VAR_oci2_fingerprint:         ${{ secrets.OCI2_FINGERPRINT }}
-          TF_VAR_oci2_private_key:         ${{ secrets.OCI2_PRIVATE_KEY }}
-          TF_VAR_oci2_region:              ${{ secrets.OCI2_REGION }}
-          TF_VAR_oci2_availability_domain: ${{ secrets.OCI2_AVAILABILITY_DOMAIN }}
-          TF_VAR_oci2_compartment_id:      ${{ secrets.OCI2_COMPARTMENT_ID }}
-          TF_VAR_tailscale_auth_key:      ${{ secrets.TAILSCALE_AUTH_KEY }}
-          TF_VAR_cloudflare_api_token:    ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          TF_VAR_cloudflare_zone_id:      ${{ secrets.CLOUDFLARE_ZONE_ID }}
-          TF_VAR_azure_tenant_id:         ${{ secrets.AZURE_TENANT_ID }}
-          TF_VAR_azure_client_id:         ${{ secrets.AZURE_CLIENT_ID }}
-          TF_VAR_azure_client_secret:     ${{ secrets.AZURE_CLIENT_SECRET }}
-          TF_VAR_azure_subscription_id:   ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          TF_VAR_alert_email:             ${{ secrets.ALERT_EMAIL }}
-        run: |
-          terraform plan -no-color -out=tfplan
-          terraform apply tfplan
+          AWS_REGION: ap-south-1
+        run: terraform apply -input=false tfplan
