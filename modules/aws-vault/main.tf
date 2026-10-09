@@ -3,7 +3,7 @@
 # The Vault — isolated AWS account for Vaultwarden
 #
 # NAT REMOVAL — ROUTE-FLIP APPROACH (instance is NEVER replaced):
-#   · Instance stays in its existing subnet (subnet-0ed3906bbcff7788d).
+#   · Instance stays in its existing subnet (aws_subnet.private).
 #   · That subnet's route table default route is flipped NAT -> IGW.
 #   · An Elastic IP is associated to the RUNNING instance (in-place) so it
 #     has a public IP for outbound via the IGW. Vaultwarden is NOT exposed.
@@ -44,7 +44,7 @@ resource "aws_vpc" "vault" {
 }
 
 # ── Internet Gateway ──────────────────────────────────────────────────────────
-# Resource name MUST stay "igw" to match state (igw-02ae33e6cbd85ac84).
+# Resource name MUST stay "igw" to match the existing state address.
 
 resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.vault.id
