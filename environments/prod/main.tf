@@ -57,7 +57,7 @@ provider "aws" {
 provider "google" {
   project               = var.gcp_project_id
   region                = var.gcp_region
-  billing_project       = var.gcp_project_id # FIX 7: was hardcoded "cloudexplorersclub"
+  billing_project       = var.gcp_project_id # quota/billing project = the deployment project
   user_project_override = true
 }
 
